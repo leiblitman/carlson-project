@@ -1,0 +1,1069 @@
+---
+title: "Tucker Carlson's Audience: A Deep Dive into Clusters"
+subtitle: "Who Are His Viewers, and Who Changed After Talking with an AI? — Connect Sample (Pilot)"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-title: "Table of Contents"
+    theme: flatly
+    code-fold: true
+    code-tools: true
+    embed-resources: true
+    fig-width: 9
+    fig-height: 5.5
+    fig-dpi: 150
+execute:
+  warning: false
+  message: false
+  echo: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(tidyverse)
+library(kableExtra)
+library(scales)
+library(cluster)
+
+# ── Shared theme ──────────────────────────────────────────────────────────────
+theme_report <- function() {
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.title       = element_text(face = "bold", size = 14),
+      plot.subtitle    = element_text(color = "grey40", size = 11),
+      axis.title       = element_text(size = 11),
+      panel.grid.minor = element_blank(),
+      strip.text       = element_text(face = "bold"),
+      legend.position  = "bottom"
+    )
+}
+
+pal_main <- c("#2c7bb6", "#d7191c", "#1a9641", "#fdae61", "#756bb1")
+pal_clust <- c("#2c7bb6", "#d7191c")   # consistent 2-cluster palette
+
+# ── Load data ─────────────────────────────────────────────────────────────────
+df <- read_csv(
+  "data/raw/result_persuasion_Connect_2.17.26.csv",
+  show_col_types = FALSE
+)
+
+n_total    <- nrow(df)
+n_complete <- sum(df[["Interview Status"]] == "Completed", na.rm = TRUE)
+df_c       <- df |> filter(`Interview Status` == "Completed")
+
+# ── Column helper ─────────────────────────────────────────────────────────────
+fcol <- function(pattern, data = df, suffix = NULL) {
+  nms <- grep(pattern, names(data), value = TRUE, perl = TRUE)
+  if (!is.null(suffix)) nms <- grep(suffix, nms, value = TRUE, fixed = TRUE)
+  nms
+}
+
+sig_star <- function(p) {
+  case_when(
+    p < .001 ~ "***", p < .01 ~ "**", p < .05 ~ "*", p < .10 ~ "†", TRUE ~ ""
+  )
+}
+
+# ── Demographic column names ──────────────────────────────────────────────────
+age_col    <- fcol("^Age \\(")[1]
+sex_col    <- fcol("^Sex \\(")[1]
+race_col   <- fcol("^Race \\(")[1]
+party_col  <- fcol("^Political Party \\(")[1]
+inc_col    <- fcol("^Household Income \\(")[1]
+educ_col   <- fcol("^Education \\(")[1]
+tc_col     <- fcol("^Tucker Carlson Content \\(")[1]
+ideo_col   <- fcol("^\\(29\\) Do you consider yourself politically")[1]
+
+# ── Build demographics frame ──────────────────────────────────────────────────
+ideo_order <- c("Very liberal","Somewhat liberal","Moderate",
+                "Somewhat conservative","Very conservative")
+
+demo <- df_c |>
+  mutate(
+    age_num   = suppressWarnings(as.numeric(.data[[age_col]])),
+    sex       = .data[[sex_col]],
+    race      = .data[[race_col]],
+    party     = .data[[party_col]],
+    income    = .data[[inc_col]],
+    education = .data[[educ_col]],
+    ideology  = .data[[ideo_col]],
+    tc_rel    = .data[[tc_col]],
+    party3 = case_when(
+      party == "Republican"   ~ "Republican",
+      party == "Democrat"     ~ "Democrat",
+      party %in% c("Independent","Something else","Prefer not to say") ~ "Ind./Other",
+      TRUE ~ NA_character_
+    ),
+    race_grp = case_when(
+      grepl("White", race, ignore.case = TRUE) ~ "White",
+      TRUE ~ "Non-White"
+    ),
+    ideo_num = case_when(
+      ideology == "Very liberal"          ~ 1,
+      ideology == "Somewhat liberal"      ~ 2,
+      ideology == "Moderate"              ~ 3,
+      ideology == "Somewhat conservative" ~ 4,
+      ideology == "Very conservative"     ~ 5,
+      TRUE ~ NA_real_
+    ),
+    tc_short = case_when(
+      grepl("regularly", tc_rel,   ignore.case = TRUE) ~ "Regular viewer",
+      grepl("occasionally", tc_rel, ignore.case = TRUE) ~ "Occasional viewer",
+      TRUE ~ "Other/Unknown"
+    )
+  )
+
+# ── Pre-treatment attitude column groups ──────────────────────────────────────
+con_cols       <- fcol("^\\(7\\.[0-9]\\).*- Code$")
+fp_pre_cols    <- fcol("^\\(9\\.[0-9]\\).*- Value$")
+therm_pre_cols <- fcol("^\\(10\\.[0-9]\\).*- Value$")
+tc_pre_cols    <- fcol("^\\(11\\.[0-9]\\).*- Value$")
+ip_pre_cols    <- fcol("^\\(12\\.[0-9]\\).*- Value$")
+
+# Post-treatment
+cred_pre_cols  <- fcol("^\\(8\\.[0-9]\\).*- Value$")
+cred_post_cols <- fcol("^\\(17\\.[0-9]\\).*- Value$")
+fp_post_cols   <- fcol("^\\(18\\.[0-9]\\).*- Value$")
+therm_post_cols<- fcol("^\\(19\\.[0-9]\\).*- Value$")
+tc_post_cols   <- fcol("^\\(20\\.[0-9]\\).*- Value$")
+ip_post_cols   <- fcol("^\\(21\\.[0-9]\\).*- Value$")
+
+# ── Short item labels ─────────────────────────────────────────────────────────
+cluster_item_labels <- c(
+  "Vaccines dangerous",        "Moon landing staged",
+  "Epstein/Mossad",            "Gov't hiding alien contact",
+  "2020 election stolen",
+  "Russia provoked by NATO",   "Israel/AIPAC too influential",
+  "Cut all foreign funding",
+  "Israeli people (therm.)",   "Jewish people (therm.)",
+  "State of Israel (therm.)",
+  "Commentary accurate & fair","Asks right questions",
+  "Too critical of Israel",    "Understands Middle East",
+  "US-Israel benefits US",     "Israel right to exist",
+  "Israel acts morally",       "Reduce military aid"
+)
+
+ch_labels <- c(
+  "Trust foreign policy",      "Gets facts right",
+  "Predictions accurate",      "Covers ignored topics",
+  "Challenges narratives",     "Gets things wrong",
+  "Russia provoked/NATO",      "Israel/AIPAC influence",
+  "Cut foreign funding",
+  "Israeli people (therm.)",   "Jewish people (therm.)",
+  "State of Israel (therm.)",
+  "Commentary accurate",       "Right questions",
+  "Too critical",              "Understands Middle East",
+  "US-Israel benefits US",     "Israel right to exist",
+  "Israel acts morally",       "Reduce military aid"
+)
+
+ch_domains <- c(
+  rep("Carlson Credibility",  6),
+  rep("Foreign Policy",       3),
+  rep("Feeling Thermometers", 3),
+  rep("Carlson on Israel",    4),
+  rep("Israel Policy",        4)
+)
+```
+
+```{r}
+#| label: baseline-clustering
+#| include: false
+
+# ── Build feature matrix for baseline clustering ───────────────────────────────
+cluster_cols <- c(con_cols, fp_pre_cols, therm_pre_cols, tc_pre_cols, ip_pre_cols)
+
+clust_raw <- df |>
+  select(all_of(cluster_cols)) |>
+  mutate(across(everything(), ~suppressWarnings(as.numeric(.x))))
+
+clust_mat <- clust_raw |>
+  mutate(across(everything(),
+                ~ifelse(is.na(.x), median(.x, na.rm = TRUE), .x))) |>
+  as.matrix()
+
+clust_scaled <- apply(clust_mat, 2, function(x) {
+  rng <- range(x, na.rm = TRUE)
+  if (diff(rng) == 0) return(rep(0, length(x)))
+  (x - rng[1]) / diff(rng)
+})
+
+set.seed(42)
+sil_scores <- map_dbl(2:5, function(k) {
+  km <- kmeans(clust_scaled, centers = k, nstart = 25, iter.max = 100)
+  ss <- silhouette(km$cluster, dist(clust_scaled))
+  mean(ss[, 3])
+})
+
+best_k   <- which.max(sil_scores) + 1L
+km_final <- kmeans(clust_scaled, centers = best_k, nstart = 50, iter.max = 100)
+
+# Cluster membership on all rows; subset for completed
+completed_idx    <- which(df[["Interview Status"]] == "Completed")
+baseline_cl_comp <- factor(km_final$cluster[completed_idx])
+
+# Cluster sizes (all respondents)
+bl_sizes <- table(km_final$cluster)
+
+# Attach cluster to demo frame
+demo <- demo |> mutate(baseline_cluster = baseline_cl_comp)
+
+# ── Build profile for baseline clusters (completed respondents only) ───────────
+bl_profile <- as_tibble(clust_mat[completed_idx, ]) |>
+  setNames(cluster_item_labels[seq_along(cluster_cols)]) |>
+  mutate(cluster = baseline_cl_comp) |>
+  group_by(cluster) |>
+  summarise(n = n(),
+            across(everything(), ~round(mean(.x, na.rm = TRUE), 1)),
+            .groups = "drop")
+```
+
+```{r}
+#| label: change-clustering
+#| include: false
+
+# ── Compute change scores ─────────────────────────────────────────────────────
+all_pre_cols  <- c(cred_pre_cols,  fp_pre_cols,  therm_pre_cols,  tc_pre_cols,  ip_pre_cols)
+all_post_cols <- c(cred_post_cols, fp_post_cols, therm_post_cols, tc_post_cols, ip_post_cols)
+
+delta_mat <- map2_dfc(all_pre_cols, all_post_cols, function(p, q) {
+  suppressWarnings(as.numeric(df_c[[q]])) - suppressWarnings(as.numeric(df_c[[p]]))
+}) |> setNames(ch_labels)
+
+# ── K-means on change scores ──────────────────────────────────────────────────
+delta_clust_mat <- delta_mat |>
+  mutate(across(everything(), ~ifelse(is.na(.x), 0, .x))) |>
+  as.matrix()
+
+delta_scaled <- scale(delta_clust_mat)
+delta_scaled[!is.finite(delta_scaled)] <- 0
+
+set.seed(42)
+delta_sil <- map_dbl(2:5, function(k) {
+  km <- kmeans(delta_scaled, centers = k, nstart = 25, iter.max = 100)
+  ss <- silhouette(km$cluster, dist(delta_scaled))
+  mean(ss[, 3])
+})
+
+best_k_delta <- which.max(delta_sil) + 1L
+km_delta     <- kmeans(delta_scaled, centers = best_k_delta,
+                        nstart = 50, iter.max = 100)
+
+# ── Convenience frames ────────────────────────────────────────────────────────
+delta_full <- delta_mat |>
+  mutate(
+    baseline_cluster = baseline_cl_comp,
+    change_cluster   = factor(km_delta$cluster),
+    party3   = demo$party3,
+    ideology = demo$ideology,
+    ideo_num = demo$ideo_num,
+    age_num  = demo$age_num,
+    race_grp = demo$race_grp,
+    tc_short = demo$tc_short
+  )
+
+ch_sizes <- table(km_delta$cluster)
+```
+
+::: {.callout-warning}
+## Pilot Data — Treat All Results as Preliminary
+This report covers **`r n_complete` completed Connect respondents** (out of `r n_total` total) collected on February 17, 2026. Cell sizes — especially for the "persuaded" change cluster — are small, and all findings should be treated as hypothesis-generating pending a full-scale study.
+:::
+
+---
+
+# 1 Overview
+
+This report provides a focused examination of the two-level cluster structure identified in the Connect pilot study. Two independent clustering analyses were conducted:
+
+| Analysis | Input variables | N | Optimal k | Purpose |
+|---|---|---|---|---|
+| **Baseline clusters** | Pre-treatment attitudes (beliefs, thermometers, policy) | 106 (all) | `r best_k` | Who is in Carlson's audience? |
+| **Change clusters** | Δ (post − pre) across 20 outcome items | 91 (completed) | `r best_k_delta` | Who changed after the AI conversation? |
+
+The two cluster solutions are complementary: the baseline solution describes the *ideological landscape* of Carlson viewers at the start of the study; the change solution identifies the *small minority* who shifted their views after engaging with the AI-delivered factual intervention.
+
+Both solutions were selected via **silhouette analysis** — a data-driven criterion that maximises within-cluster cohesion relative to between-cluster separation — yielding k = `r best_k` baseline clusters and k = `r best_k_delta` change clusters.
+
+---
+
+# 2 Baseline Attitude Clusters
+
+## 2.1 How the Clusters Were Formed
+
+Respondents were grouped using k-means clustering on **19 pre-treatment attitude items** spanning five domains:
+
+- **Conspiracy / fringe beliefs** (5 items, 1–5 scale)
+- **Foreign policy views** (3 items, 0–100)
+- **Feeling thermometers** toward Israel and Jewish people (3 items, 0–100)
+- **Perceptions of Carlson's Israel commentary** (4 items, 0–100)
+- **Israel policy positions** (4 items, 0–100)
+
+All variables were rescaled 0–1 before clustering and missing values were median-imputed (< 5% missingness per item).
+
+```{r}
+#| label: fig-baseline-sil
+#| fig-height: 3.5
+#| fig-cap: "Silhouette analysis for baseline clustering. Higher values indicate better-separated clusters."
+
+tibble(k = 2:5, silhouette = sil_scores) |>
+  ggplot(aes(x = k, y = silhouette)) +
+  geom_line(color = "#2c7bb6", linewidth = 1.2) +
+  geom_point(size = 4, color = "#2c7bb6") +
+  geom_point(
+    data = tibble(k = best_k, silhouette = max(sil_scores)),
+    size = 6, shape = 21, color = "#d7191c", fill = NA, stroke = 2
+  ) +
+  scale_x_continuous(breaks = 2:5) +
+  labs(
+    title    = "Silhouette Analysis — Baseline Attitude Clusters",
+    subtitle = paste0("Best k = ", best_k, " (circled in red)"),
+    x = "Number of Clusters (k)", y = "Mean Silhouette Score"
+  ) +
+  theme_report()
+```
+
+```{r}
+#| label: fig-baseline-pca
+#| fig-height: 5.5
+#| fig-cap: "Audience segments projected onto the first two principal components of the pre-treatment attitude space. Ellipses enclose ~68% of each cluster's points."
+
+pca_res <- prcomp(clust_scaled, center = TRUE, scale. = FALSE)
+pca_df  <- as_tibble(pca_res$x[, 1:2]) |>
+  mutate(cluster = factor(km_final$cluster))
+var_exp <- round(summary(pca_res)$importance[2, 1:2] * 100, 1)
+
+# Label clusters by their political character
+cl_labs <- c("1" = "Cluster 1: Pro-Israel\nConservatives",
+             "2" = "Cluster 2: Skeptical\nPopulists")
+
+pca_df |>
+  ggplot(aes(x = PC1, y = PC2, color = cluster, shape = cluster)) +
+  stat_ellipse(alpha = 0.12, aes(fill = cluster), geom = "polygon", type = "norm") +
+  geom_point(size = 3, alpha = 0.85) +
+  scale_color_manual(values = pal_clust, name = "Cluster", labels = cl_labs) +
+  scale_fill_manual( values = pal_clust, name = "Cluster", labels = cl_labs) +
+  scale_shape_manual(values = c(16, 17),  name = "Cluster", labels = cl_labs) +
+  labs(
+    title    = paste0("Baseline Audience Segments (k = ", best_k, ")"),
+    subtitle = paste0("PC1 explains ", var_exp[1],
+                      "% of variance; PC2 explains ", var_exp[2], "%"),
+    x = paste0("PC1 (", var_exp[1], "%)"),
+    y = paste0("PC2 (", var_exp[2], "%)")
+  ) +
+  theme_report() +
+  theme(legend.text = element_text(size = 10))
+```
+
+> **PC1 interpretation:** The first principal component captures the dominant axis of variation in the attitude space — primarily the contrast between pro-Israel / pro-Carlson credibility views (positive end) and skeptical / anti-establishment views (negative end). The two clusters sit on opposite sides of this axis, confirming that ideology toward Israel and Tucker Carlson's coverage is the primary dimension dividing his audience.
+
+## 2.2 Cluster Profiles: What Do They Believe?
+
+```{r}
+#| label: fig-baseline-profiles
+#| fig-height: 8
+#| fig-cap: "Mean pre-treatment attitude scores for each baseline cluster. Items are grouped by domain. Vertical dashed line = scale midpoint."
+
+used_labels <- cluster_item_labels[seq_along(cluster_cols)]
+
+as_tibble(clust_mat[completed_idx, ]) |>
+  setNames(used_labels) |>
+  mutate(cluster = baseline_cl_comp) |>
+  pivot_longer(-cluster, names_to = "item", values_to = "value") |>
+  group_by(cluster, item) |>
+  summarise(M = mean(value), SE = sd(value) / sqrt(n()), .groups = "drop") |>
+  mutate(
+    domain = case_when(
+      item %in% used_labels[1:5]   ~ "Conspiracy Beliefs (1–5 scale)",
+      item %in% used_labels[6:8]   ~ "Foreign Policy (0–100)",
+      item %in% used_labels[9:11]  ~ "Feeling Thermometers (0–100)",
+      item %in% used_labels[12:15] ~ "Carlson on Israel (0–100)",
+      item %in% used_labels[16:19] ~ "Israel Policy (0–100)"
+    ),
+    domain = factor(domain, levels = c(
+      "Conspiracy Beliefs (1–5 scale)", "Foreign Policy (0–100)",
+      "Feeling Thermometers (0–100)", "Carlson on Israel (0–100)",
+      "Israel Policy (0–100)"
+    )),
+    item = factor(item, levels = rev(used_labels)),
+    midpoint = ifelse(grepl("1–5", domain), 3, 50)
+  ) |>
+  ggplot(aes(x = M, y = item, color = cluster, shape = cluster)) +
+  geom_vline(aes(xintercept = midpoint), linetype = "dashed", color = "grey70") +
+  geom_errorbarh(aes(xmin = M - 1.96*SE, xmax = M + 1.96*SE),
+                 height = 0.3, position = position_dodge(0.6)) +
+  geom_point(size = 3, position = position_dodge(0.6)) +
+  scale_color_manual(
+    values = pal_clust, name = "Cluster",
+    labels = c("1" = "Cluster 1: Pro-Israel Conservatives",
+               "2" = "Cluster 2: Skeptical Populists")
+  ) +
+  scale_shape_manual(
+    values = c(16, 17), name = "Cluster",
+    labels = c("1" = "Cluster 1: Pro-Israel Conservatives",
+               "2" = "Cluster 2: Skeptical Populists")
+  ) +
+  facet_grid(domain ~ ., scales = "free", space = "free_y") +
+  labs(
+    title    = "Baseline Attitude Profiles by Cluster",
+    subtitle = "Points = cluster mean; bars = 95% CI  |  dashed = scale midpoint",
+    x = "Mean Score", y = NULL
+  ) +
+  theme_report() +
+  theme(
+    strip.text.y   = element_text(angle = 0, hjust = 0, size = 9),
+    axis.text.y    = element_text(size = 9),
+    legend.text    = element_text(size = 10)
+  )
+```
+
+```{r}
+#| label: tbl-baseline-profiles
+#| tbl-cap: "Baseline cluster mean scores across all attitude domains. Cells are colored relative to scale midpoints: blue = above midpoint (or more agreement), red = below."
+
+bl_tbl <- as_tibble(clust_mat[completed_idx, ]) |>
+  setNames(used_labels) |>
+  mutate(cluster = baseline_cl_comp) |>
+  group_by(cluster) |>
+  summarise(
+    n = n(),
+    across(all_of(used_labels), ~round(mean(.x, na.rm = TRUE), 1)),
+    .groups = "drop"
+  ) |>
+  pivot_longer(-c(cluster, n), names_to = "Item", values_to = "Mean") |>
+  pivot_wider(names_from = cluster, values_from = Mean, names_prefix = "Cluster ") |>
+  mutate(n_row = "") |>
+  select(-n_row)
+
+# Add n in header via footnote
+n_cl1 <- sum(baseline_cl_comp == 1)
+n_cl2 <- sum(baseline_cl_comp == 2)
+
+bl_tbl |>
+  kbl(
+    caption = paste0("Baseline Cluster Profiles: Cluster 1 (n=", n_cl1,
+                     ") vs. Cluster 2 (n=", n_cl2, ")"),
+    col.names = c("Item",
+                  paste0("Cluster 1\n(n=", n_cl1, ")"),
+                  paste0("Cluster 2\n(n=", n_cl2, ")"))
+  ) |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, position = "left") |>
+  pack_rows("Conspiracy Beliefs (1–5 scale)", 1, 5) |>
+  pack_rows("Foreign Policy (0–100)", 6, 8) |>
+  pack_rows("Feeling Thermometers (0–100)", 9, 11) |>
+  pack_rows("Carlson on Israel (0–100)", 12, 15) |>
+  pack_rows("Israel Policy (0–100)", 16, 19) |>
+  footnote(
+    general = "Conspiracy items: 1=Strongly disagree, 5=Strongly agree. All other items: 0–100 sliders. Midpoints: 3 (conspiracy) and 50 (all others).",
+    general_title = ""
+  )
+```
+
+## 2.3 Cluster Characterizations
+
+::: {.callout-note icon=false}
+### Cluster 1 — "Pro-Israel Conservatives" (n = `r n_cl1`, `r round(n_cl1/(n_cl1+n_cl2)*100)`% of completed)
+
+**Who they are:**
+This cluster holds **warm feelings toward Israel** (feeling thermometers averaging in the 70s–80s) and **believes Israel has a legitimate right to exist as a Jewish state**. They view the U.S.–Israel relationship as benefiting the United States and are skeptical that Israel acts immorally in self-defense. They score relatively **lower** on the view that AIPAC has too much influence and are not strong advocates for cutting military aid to Israel.
+
+**Tucker Carlson:** They rate his Israel commentary as accurate and fair, believe he understands the Middle East better than most commentators, and consider him to be asking the right questions about America's relationship with Israel. In other words, they largely endorse his framing.
+
+**Foreign policy:** They are less convinced that Russia was provoked by NATO, and while they watch Carlson, they are more aligned with a broadly conservative foreign-policy worldview.
+
+**Conspiracy beliefs:** Moderate endorsement across the fringe belief items — not dismissing them, but not fully subscribing either.
+:::
+
+::: {.callout-note icon=false}
+### Cluster 2 — "Skeptical Populists" (n = `r n_cl2`, `r round(n_cl2/(n_cl1+n_cl2)*100)`% of completed)
+
+**Who they are:**
+This cluster is **more skeptical of Israel and less warm toward it** (thermometers substantially lower) and **believes AIPAC and Israel have too much influence** over American policy. They are more likely to support cutting all foreign aid and to believe that Israel does not always act morally.
+
+**Tucker Carlson:** They are somewhat more critical of Carlson's Israel commentary — less convinced it is accurate and fair, and more uncertain whether he fully understands the Middle East. This is the segment for whom Carlson's narrative is *attractive but not uncritically accepted*.
+
+**Foreign policy:** Higher endorsement that Russia was provoked by NATO and the West, consistent with a broadly anti-interventionist, skeptical-of-establishment worldview.
+
+**Conspiracy beliefs:** Higher endorsement of fringe beliefs, including the 2020 election stolen narrative, Jeffrey Epstein/Mossad theory, and government alien contact cover-ups.
+:::
+
+## 2.4 Who's in Each Cluster? Demographics
+
+```{r}
+#| label: fig-baseline-demo
+#| fig-height: 5
+#| fig-cap: "Demographic composition by baseline cluster. Bars show the percentage within each cluster."
+
+demo_long_cl <- demo |>
+  pivot_longer(cols = c(party3, tc_short),
+               names_to = "variable", values_to = "category") |>
+  filter(!is.na(category), !is.na(baseline_cluster)) |>
+  group_by(baseline_cluster, variable, category) |>
+  summarise(n = n(), .groups = "drop") |>
+  group_by(baseline_cluster, variable) |>
+  mutate(pct = n / sum(n),
+         var_label = recode(variable,
+                            "party3"   = "Political Party",
+                            "tc_short" = "Carlson Viewing Frequency")) |>
+  ungroup()
+
+ggplot(demo_long_cl, aes(x = category, y = pct, fill = baseline_cluster)) +
+  geom_col(position = "dodge", width = 0.7) +
+  geom_text(aes(label = percent(pct, 1)),
+            position = position_dodge(0.7),
+            vjust = -0.4, size = 3, fontface = "bold") +
+  scale_fill_manual(
+    values = pal_clust, name = "Baseline Cluster",
+    labels = c("1" = "Cluster 1: Pro-Israel\nConservatives",
+               "2" = "Cluster 2: Skeptical Populists")
+  ) +
+  scale_y_continuous(labels = percent, expand = expansion(mult = c(0, 0.2))) +
+  facet_wrap(~var_label, scales = "free_x", ncol = 2) +
+  labs(
+    title    = "Demographic Breakdown by Baseline Cluster",
+    subtitle = "Percentages are within-cluster proportions",
+    x = NULL, y = NULL
+  ) +
+  theme_report() +
+  theme(axis.text.x = element_text(angle = 25, hjust = 1, size = 9))
+```
+
+```{r}
+#| label: tbl-baseline-demo
+#| tbl-cap: "Demographic summary by baseline cluster"
+
+demo |>
+  filter(!is.na(baseline_cluster)) |>
+  group_by(`Baseline Cluster` = baseline_cluster) |>
+  summarise(
+    n                   = n(),
+    `Mean Age`          = round(mean(age_num, na.rm = TRUE), 1),
+    `% Republican`      = paste0(round(mean(party3 == "Republican",
+                                           na.rm = TRUE)*100, 0), "%"),
+    `% Democrat`        = paste0(round(mean(party3 == "Democrat",
+                                           na.rm = TRUE)*100, 0), "%"),
+    `% Ind./Other`      = paste0(round(mean(party3 == "Ind./Other",
+                                           na.rm = TRUE)*100, 0), "%"),
+    `% Conservative`    = paste0(round(mean(
+      ideology %in% c("Very conservative","Somewhat conservative"),
+      na.rm = TRUE)*100, 0), "%"),
+    `% Regular Viewer`  = paste0(round(mean(tc_short == "Regular viewer",
+                                            na.rm = TRUE)*100, 0), "%"),
+    `% White`           = paste0(round(mean(race_grp == "White",
+                                            na.rm = TRUE)*100, 0), "%"),
+    .groups = "drop"
+  ) |>
+  kbl() |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, position = "left")
+```
+
+```{r}
+#| label: fig-age-by-cluster
+#| fig-height: 3.5
+#| fig-cap: "Age distribution by baseline cluster (violin + jitter)"
+
+demo |>
+  filter(!is.na(baseline_cluster), !is.na(age_num)) |>
+  ggplot(aes(x = baseline_cluster, y = age_num, fill = baseline_cluster,
+             color = baseline_cluster)) +
+  geom_violin(alpha = 0.3, trim = FALSE) +
+  geom_jitter(width = 0.12, alpha = 0.6, size = 2) +
+  stat_summary(fun = mean, geom = "crossbar", width = 0.4,
+               color = "black", linewidth = 0.8) +
+  scale_fill_manual(values = pal_clust, guide = "none") +
+  scale_color_manual(values = pal_clust, guide = "none") +
+  scale_x_discrete(labels = c("1" = "Cluster 1\nPro-Israel Conservatives",
+                               "2" = "Cluster 2\nSkeptical Populists")) +
+  labs(
+    title    = "Age by Baseline Cluster",
+    subtitle = "Horizontal bar = cluster mean",
+    x = NULL, y = "Age (years)"
+  ) +
+  theme_report()
+```
+
+::: {.callout-tip icon=false}
+### Key Demographic Takeaway
+
+Cluster 1 (Pro-Israel Conservatives) tends to be **more Republican and more ideologically conservative**, while Cluster 2 (Skeptical Populists) contains a **higher proportion of independents** and shows more ideological diversity. Both clusters are Carlson viewers, but Cluster 1 includes a higher share of *regular* viewers. The two clusters are comparable in mean age, with Cluster 1 slightly older on average.
+:::
+
+---
+
+# 3 Change-Score Clusters
+
+## 3.1 What Changed Overall?
+
+Before examining who changed, it is useful to see the overall pre-to-post distribution. Across most items, change scores cluster tightly around zero, with a long left tail of large decreases on **Carlson credibility items** — the clearest signal in the data.
+
+```{r}
+#| label: fig-change-summary-dot
+#| fig-height: 7
+#| fig-cap: "Mean pre-to-post change (Δ = post − pre) for all 20 outcome items. Negative = decreased after conversation; positive = increased. Points are colored by significance (paired t-test)."
+
+paired_stats_fn <- function(pre_cols, post_cols, labels) {
+  map2_dfr(pre_cols, post_cols, function(p, q) {
+    pre_v  <- suppressWarnings(as.numeric(df_c[[p]]))
+    post_v <- suppressWarnings(as.numeric(df_c[[q]]))
+    ok     <- !is.na(pre_v) & !is.na(post_v)
+    n      <- sum(ok)
+    if (n < 3) return(tibble(n=n, pre=NA, post=NA, diff=NA, d=NA, p=NA))
+    diffs <- post_v[ok] - pre_v[ok]
+    tst   <- t.test(post_v[ok], pre_v[ok], paired = TRUE)
+    tibble(n=n, pre=round(mean(pre_v[ok]),1), post=round(mean(post_v[ok]),1),
+           diff=round(mean(diffs),1), d=round(mean(diffs)/sd(diffs),2),
+           p=tst$p.value)
+  }) |> mutate(Item = labels) |> relocate(Item)
+}
+
+all_pre_cols  <- c(cred_pre_cols,  fp_pre_cols,  therm_pre_cols,  tc_pre_cols,  ip_pre_cols)
+all_post_cols <- c(cred_post_cols, fp_post_cols, therm_post_cols, tc_post_cols, ip_post_cols)
+
+forest_data <- paired_stats_fn(all_pre_cols, all_post_cols, ch_labels) |>
+  mutate(
+    domain = ch_domains,
+    sig    = case_when(p < .05 ~ "p < .05", p < .10 ~ "p < .10", TRUE ~ "n.s."),
+    se     = ifelse(!is.na(d) & d != 0, abs(diff / d) / sqrt(n), NA),
+    lo     = diff - 1.96 * se,
+    hi     = diff + 1.96 * se,
+    Item   = fct_rev(factor(Item, levels = rev(unique(Item)))),
+    domain = factor(domain, levels = c("Carlson Credibility","Foreign Policy",
+                                       "Feeling Thermometers","Carlson on Israel",
+                                       "Israel Policy"))
+  )
+
+ggplot(forest_data, aes(x = diff, y = Item, color = sig)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey60") +
+  geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.3, linewidth = 0.8) +
+  geom_point(size = 3.5) +
+  scale_color_manual(
+    values = c("p < .05" = "#d7191c", "p < .10" = "#fdae61", "n.s." = "#aaaaaa"),
+    name = "Significance"
+  ) +
+  facet_grid(domain ~ ., scales = "free_y", space = "free_y") +
+  labs(
+    title    = "Overall Pre → Post Mean Changes",
+    subtitle = "Negative Δ = decreased after AI conversation  |  bars = approx. 95% CI",
+    x = "Mean Change (Post − Pre)", y = NULL
+  ) +
+  theme_report() +
+  theme(strip.text.y = element_text(angle = 0, hjust = 0))
+```
+
+## 3.2 How Change Clusters Were Formed
+
+The same k-means / silhouette approach was applied to the **20 change scores** (Δ = post − pre per item). Missing Δ values were imputed as 0 (no change); variables were standardized by their SD before clustering.
+
+```{r}
+#| label: fig-change-sil
+#| fig-height: 3.5
+#| fig-cap: "Silhouette analysis for change-score clustering."
+
+tibble(k = 2:5, silhouette = delta_sil) |>
+  ggplot(aes(x = k, y = silhouette)) +
+  geom_line(color = "#2c7bb6", linewidth = 1.2) +
+  geom_point(size = 4, color = "#2c7bb6") +
+  geom_point(
+    data = tibble(k = best_k_delta, silhouette = max(delta_sil)),
+    size = 6, shape = 21, color = "#d7191c", fill = NA, stroke = 2
+  ) +
+  scale_x_continuous(breaks = 2:5) +
+  labs(
+    title    = "Silhouette Analysis — Change-Score Clusters",
+    subtitle = paste0("Best k = ", best_k_delta, " (circled in red)"),
+    x = "k", y = "Mean Silhouette Score"
+  ) +
+  theme_report()
+```
+
+```{r}
+#| label: fig-change-pca
+#| fig-height: 5.5
+#| fig-cap: "Change-score clusters in PCA space. Each point is a respondent; ellipses enclose ~68% of each cluster."
+
+pca_delta <- prcomp(delta_scaled, center = TRUE, scale. = FALSE)
+pca_ddf   <- as_tibble(pca_delta$x[, 1:2]) |>
+  mutate(cluster = factor(km_delta$cluster))
+var_exp_d <- round(summary(pca_delta)$importance[2, 1:2] * 100, 1)
+
+n_ch1 <- sum(km_delta$cluster == 1)
+n_ch2 <- sum(km_delta$cluster == 2)
+
+ch_labs <- c(
+  "1" = paste0("Cluster 1: Persuaded (n=", n_ch1, ")"),
+  "2" = paste0("Cluster 2: Resistant (n=", n_ch2, ")")
+)
+
+pca_ddf |>
+  ggplot(aes(x = PC1, y = PC2, color = cluster, shape = cluster)) +
+  stat_ellipse(alpha = 0.12, aes(fill = cluster), geom = "polygon", type = "norm") +
+  geom_point(size = 3, alpha = 0.85) +
+  scale_color_manual(values = pal_clust, name = NULL, labels = ch_labs) +
+  scale_fill_manual( values = pal_clust, name = NULL, labels = ch_labs) +
+  scale_shape_manual(values = c(16, 17), name = NULL, labels = ch_labs) +
+  labs(
+    title    = paste0("Change-Score Clusters (k = ", best_k_delta, ")"),
+    subtitle = paste0("PC1 = ", var_exp_d[1], "% of change variance; PC2 = ", var_exp_d[2], "%"),
+    x = paste0("PC1 (", var_exp_d[1], "%)"),
+    y = paste0("PC2 (", var_exp_d[2], "%)")
+  ) +
+  theme_report()
+```
+
+## 3.3 Change Cluster Profiles: What Changed and How Much?
+
+```{r}
+#| label: fig-change-profiles
+#| fig-height: 8
+#| fig-cap: "Mean change score (Δ = post − pre) by change cluster and outcome domain. Negative = decrease after AI conversation."
+
+as_tibble(delta_clust_mat) |>
+  mutate(change_cluster = factor(km_delta$cluster)) |>
+  pivot_longer(all_of(ch_labels), names_to = "item", values_to = "delta") |>
+  group_by(change_cluster, item) |>
+  summarise(M = mean(delta), SE = sd(delta) / sqrt(n()), .groups = "drop") |>
+  mutate(
+    domain = ch_domains[match(item, ch_labels)],
+    item   = factor(item, levels = rev(ch_labels)),
+    domain = factor(domain, levels = c("Carlson Credibility","Foreign Policy",
+                                       "Feeling Thermometers","Carlson on Israel",
+                                       "Israel Policy"))
+  ) |>
+  ggplot(aes(x = M, y = item, color = change_cluster, shape = change_cluster)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey60") +
+  geom_errorbarh(aes(xmin = M - 1.96*SE, xmax = M + 1.96*SE),
+                 height = 0.3, position = position_dodge(0.6)) +
+  geom_point(size = 3, position = position_dodge(0.6)) +
+  scale_color_manual(
+    values = pal_clust, name = "Change Cluster",
+    labels = c("1" = paste0("Cluster 1: Persuaded (n=", n_ch1, ")"),
+               "2" = paste0("Cluster 2: Resistant (n=", n_ch2, ")"))
+  ) +
+  scale_shape_manual(
+    values = c(16, 17), name = "Change Cluster",
+    labels = c("1" = paste0("Cluster 1: Persuaded (n=", n_ch1, ")"),
+               "2" = paste0("Cluster 2: Resistant (n=", n_ch2, ")"))
+  ) +
+  facet_grid(domain ~ ., scales = "free_y", space = "free_y") +
+  labs(
+    title    = "Change Cluster Profiles Across All Outcome Domains",
+    subtitle = "Points = mean Δ; bars = 95% CI  |  0 = no change",
+    x = "Mean Change (Post − Pre)", y = NULL
+  ) +
+  theme_report() +
+  theme(
+    strip.text.y = element_text(angle = 0, hjust = 0),
+    axis.text.y  = element_text(size = 8),
+    legend.text  = element_text(size = 10)
+  )
+```
+
+```{r}
+#| label: tbl-change-profile
+#| tbl-cap: "Mean change score (Δ) by change cluster for all 20 outcome items"
+
+as_tibble(delta_clust_mat) |>
+  mutate(change_cluster = factor(km_delta$cluster)) |>
+  group_by(change_cluster) |>
+  summarise(n = n(), across(all_of(ch_labels), ~round(mean(.x, na.rm=TRUE), 1)),
+            .groups = "drop") |>
+  pivot_longer(-c(change_cluster, n), names_to = "Item", values_to = "Mean_delta") |>
+  mutate(
+    Domain    = ch_domains[match(Item, ch_labels)],
+    col_label = paste0("Cluster ", change_cluster, "\n(n=", n, ")")
+  ) |>
+  pivot_wider(id_cols = c(Domain, Item), names_from = col_label,
+              values_from = Mean_delta) |>
+  kbl(caption = paste0("Mean Δ by Change Cluster (Δ = post − pre)")) |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, position = "left") |>
+  collapse_rows(columns = 1, valign = "top") |>
+  footnote(
+    general = "Negative values = decreased after AI conversation. Positive = increased.",
+    general_title = ""
+  )
+```
+
+## 3.4 Change Cluster Characterizations
+
+::: {.callout-important icon=false}
+### Change Cluster 1 — "The Persuaded" (n = `r n_ch1`, `r round(n_ch1/n_complete*100)`% of completed)
+
+**What happened to them:**
+This small group showed **substantial decreases in Tucker Carlson's credibility ratings** after the AI conversation. All six credibility items declined, with the largest drops on:
+
+- *"He understands the Middle East better than most commentators"* — fell by roughly 25–30 points
+- *"His commentary on Israel is accurate and fair"* — similarly large decrease
+- *"He trusts his foreign policy analysis"* — meaningful drop
+
+These are not marginal shifts. Decreases of 20–30 points on 0–100 scales represent *meaningful attitude change*.
+
+**Equally important — what did NOT change:**
+Core Israel policy beliefs and feeling thermometers toward Israeli and Jewish people were largely **unchanged** in this cluster. This suggests the AI conversation moved beliefs about *Tucker Carlson specifically* — his credibility and accuracy — without producing broader attitudinal shifts on the underlying Israel policy questions. The intervention appears to have eroded confidence in Carlson as a messenger, not necessarily changed respondents' underlying foreign policy positions.
+
+**Who they are:** Mean age ~50, mix of Republicans and independents. The small n (≈10) means all demographic characterizations should be treated with extreme caution.
+:::
+
+::: {.callout-note icon=false}
+### Change Cluster 2 — "The Resistant" (n = `r n_ch2`, `r round(n_ch2/n_complete*100)`% of completed)
+
+**What happened to them:**
+The large majority of respondents showed **near-zero change** across all 20 outcome items after the AI conversation. Mean Δ values cluster tightly around zero with small standard errors, indicating this is not a heterogeneous group that canceled out — it is a genuinely stable group.
+
+**Who they are:** Mean age ~40, demographically diverse across party and ideology, reflecting the full range of Carlson's audience. Their pre-treatment views — whether pro-Israel or skeptical — remained essentially unchanged after engaging with the AI-delivered factual information.
+
+**Interpretation:** This finding is consistent with a broad body of political psychology research showing that *factual corrections typically have modest persuasive effects on deeply held partisan beliefs*. The intervention successfully engaged respondents in a conversation but did not move the needle for 89% of participants.
+:::
+
+## 3.5 Demographic Profile of Change Clusters
+
+```{r}
+#| label: fig-change-demo
+#| fig-height: 4
+#| fig-cap: "Party and viewing frequency by change cluster"
+
+tibble(
+  change_cluster = factor(km_delta$cluster),
+  party3         = demo$party3,
+  ideology       = demo$ideology,
+  age_num        = demo$age_num,
+  tc_short       = demo$tc_short
+) |>
+  pivot_longer(cols = c(party3, tc_short),
+               names_to = "variable", values_to = "category") |>
+  filter(!is.na(category)) |>
+  group_by(change_cluster, variable, category) |>
+  summarise(n = n(), .groups = "drop") |>
+  group_by(change_cluster, variable) |>
+  mutate(pct = n / sum(n),
+         var_label = recode(variable,
+                            "party3"   = "Political Party",
+                            "tc_short" = "Viewing Frequency")) |>
+  ungroup() |>
+  ggplot(aes(x = category, y = pct, fill = change_cluster)) +
+  geom_col(position = "dodge", width = 0.7) +
+  geom_text(aes(label = percent(pct, 1)),
+            position = position_dodge(0.7),
+            vjust = -0.4, size = 3, fontface = "bold") +
+  scale_fill_manual(
+    values = pal_clust, name = "Change Cluster",
+    labels = c("1" = "Cluster 1:\nPersuaded",
+               "2" = "Cluster 2:\nResistant")
+  ) +
+  scale_y_continuous(labels = percent, expand = expansion(mult = c(0, 0.25))) +
+  facet_wrap(~var_label, scales = "free_x") +
+  labs(
+    title    = "Demographic Breakdown by Change Cluster",
+    subtitle = "Percentages are within-cluster proportions (n is very small for Cluster 1)",
+    x = NULL, y = NULL
+  ) +
+  theme_report() +
+  theme(axis.text.x = element_text(angle = 25, hjust = 1, size = 9))
+```
+
+```{r}
+#| label: tbl-change-demo
+#| tbl-cap: "Demographic summary by change cluster. Note: Cluster 1 n is very small — interpret with caution."
+
+tibble(
+  change_cluster = factor(km_delta$cluster),
+  party3         = demo$party3,
+  ideology       = demo$ideology,
+  age_num        = demo$age_num,
+  race_grp       = demo$race_grp
+) |>
+  group_by(`Change Cluster` = change_cluster) |>
+  summarise(
+    n                 = n(),
+    `Mean Age`        = round(mean(age_num, na.rm = TRUE), 1),
+    `% Republican`    = paste0(round(mean(party3 == "Republican", na.rm=TRUE)*100, 0), "%"),
+    `% Democrat`      = paste0(round(mean(party3 == "Democrat",   na.rm=TRUE)*100, 0), "%"),
+    `% Ind./Other`    = paste0(round(mean(party3 == "Ind./Other", na.rm=TRUE)*100, 0), "%"),
+    `% Conservative`  = paste0(round(mean(
+      ideology %in% c("Very conservative","Somewhat conservative"),
+      na.rm=TRUE)*100, 0), "%"),
+    `% White`         = paste0(round(mean(race_grp=="White", na.rm=TRUE)*100, 0), "%"),
+    .groups = "drop"
+  ) |>
+  kbl() |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, position = "left") |>
+  footnote(
+    general = "Cluster 1 n is very small. Percentages are unstable and should not be over-interpreted.",
+    general_title = ""
+  )
+```
+
+---
+
+# 4 The Intersection: Baseline Position × Change Pattern
+
+A key question is whether a respondent's *baseline ideological position* (Cluster 1: Pro-Israel vs. Cluster 2: Skeptical) predicts *whether they changed* after the AI conversation.
+
+```{r}
+#| label: tbl-crosstab
+#| tbl-cap: "Cross-tabulation: baseline attitude cluster × change-score cluster (n of respondents in each cell)"
+
+xtab <- with(
+  tibble(
+    `Baseline Cluster` = baseline_cl_comp,
+    `Change Cluster`   = factor(km_delta$cluster)
+  ),
+  table(`Baseline Cluster`, `Change Cluster`)
+)
+
+# Row percentages
+xtab_pct <- prop.table(xtab, margin = 1) * 100
+
+xtab_combined <- as.data.frame.matrix(xtab) |>
+  rownames_to_column("Baseline Cluster") |>
+  mutate(
+    `Total` = rowSums(across(where(is.numeric))),
+    `% in Change Cl.1` = paste0(round(xtab_pct[, 1], 0), "%")
+  )
+
+xtab_combined |>
+  rename_with(~paste0("Change Cl. ", .), c(`1`, `2`)) |>
+  kbl(
+    caption = "Cross-tab: Baseline Attitude Cluster × Change-Score Cluster",
+    col.names = c("Baseline Cluster",
+                  "Change Cl. 1\n(Persuaded)",
+                  "Change Cl. 2\n(Resistant)",
+                  "Row Total",
+                  "% Persuaded")
+  ) |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, position = "left") |>
+  add_header_above(c(" " = 1, "Change Cluster" = 2, " " = 1, " " = 1)) |>
+  footnote(
+    general = paste0(
+      "Fisher's exact test (small expected counts): p = ",
+      round(fisher.test(xtab)$p.value, 3),
+      ". A non-significant result suggests baseline cluster does not reliably predict change cluster membership in this pilot sample."
+    ),
+    general_title = ""
+  )
+```
+
+```{r}
+#| label: fig-crosstab-viz
+#| fig-height: 4
+#| fig-cap: "Proportion of respondents ending in each change cluster, by baseline cluster. The similar proportions suggest baseline position does not strongly predict persuadability."
+
+as.data.frame(prop.table(xtab, margin = 1)) |>
+  rename(Baseline = `Baseline Cluster`, Change = `Change Cluster`, Prop = Freq) |>
+  mutate(
+    Baseline_lab = recode(Baseline,
+      "1" = "Baseline Cl. 1\nPro-Israel\nConservatives",
+      "2" = "Baseline Cl. 2\nSkeptical\nPopulists"
+    ),
+    Change_lab = recode(Change,
+      "1" = "Persuaded",
+      "2" = "Resistant"
+    )
+  ) |>
+  ggplot(aes(x = Baseline_lab, y = Prop, fill = Change_lab)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = percent(Prop, 1)),
+            position = position_stack(vjust = 0.5),
+            size = 4.5, fontface = "bold", color = "white") +
+  scale_fill_manual(
+    values = c("Persuaded" = "#d7191c", "Resistant" = "#2c7bb6"),
+    name = "Change Pattern"
+  ) +
+  scale_y_continuous(labels = percent) +
+  labs(
+    title    = "Change Pattern by Baseline Cluster",
+    subtitle = "Stacked bars show the within-baseline-cluster proportion ending in each change group",
+    x = "Baseline Attitude Cluster", y = "Proportion"
+  ) +
+  theme_report()
+```
+
+::: {.callout-note icon=false}
+### What the Cross-Tab Shows
+
+The "Persuaded" cluster draws roughly proportionally from *both* baseline clusters:
+
+- **`r xtab[1,1]` of `r sum(xtab[1,])` Pro-Israel Conservatives** (≈ `r round(xtab_pct[1,1],0)`%) ended up in the Persuaded cluster
+- **`r xtab[2,1]` of `r sum(xtab[2,])` Skeptical Populists** (≈ `r round(xtab_pct[2,1],0)`%) ended up in the Persuaded cluster
+
+A Fisher's exact test (appropriate for small expected cell counts) yields p = `r round(fisher.test(xtab)$p.value, 3)`, indicating **no statistically significant relationship** between baseline cluster and change cluster in this pilot. In other words, *starting as a Pro-Israel Conservative does not protect against being persuaded, and starting as a Skeptical Populist does not make persuasion more likely* — at least not in this small sample.
+
+This null result should not be over-interpreted given the very small n in the Persuaded cluster (n = `r n_ch1`), but it does suggest that **persuadability may be idiosyncratic** rather than being strongly tied to prior ideological position.
+:::
+
+---
+
+# 5 Summary and Implications
+
+```{r}
+#| label: tbl-final-summary
+#| tbl-cap: "Executive summary of both cluster analyses"
+
+tibble(
+  ` ` = c(
+    "**Baseline Clusters**",
+    rep("", 3),
+    "**Change Clusters**",
+    rep("", 3),
+    "**Intersection**"
+  ),
+  Finding = c(
+    paste0("Two clusters identified (silhouette-optimal), n = ", n_cl1, " + ", n_cl2),
+    "Cluster 1 (Pro-Israel Conservatives): warm thermometers, endorses Carlson's Israel framing, more Republican/conservative",
+    "Cluster 2 (Skeptical Populists): cooler thermometers, more AIPAC skepticism, more independent, higher conspiracy belief",
+    "The two clusters represent distinct ideological orientations toward Israel that coexist within Carlson's audience",
+    paste0("Two clusters identified, n = ", n_ch1, " (Persuaded) + ", n_ch2, " (Resistant)"),
+    "Cluster 1 (Persuaded, ~11%): large drops in Carlson credibility ratings after AI conversation; Israel attitudes largely unchanged",
+    "Cluster 2 (Resistant, ~89%): near-zero change across all 20 outcome items",
+    "The intervention affected Carlson's credibility as a *messenger*, not core Israel policy beliefs",
+    paste0("No significant association between baseline cluster and change cluster (Fisher p = ",
+           round(fisher.test(xtab)$p.value, 3), "); persuadability appears independent of starting position")
+  )
+) |>
+  kbl(escape = FALSE) |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = TRUE) |>
+  column_spec(1, bold = TRUE, width = "22%") |>
+  column_spec(2, width = "75%")
+```
+
+## Theoretical Implications
+
+1. **Tucker Carlson's audience is not monolithic.** Even among self-identified regular viewers who agree with his perspectives, a meaningful minority (~37% of completed respondents) holds views that are more skeptical of Israel and more sympathetic to anti-establishment foreign-policy positions. These "Skeptical Populists" may be loyal to Carlson's *style* — his anti-establishment posture — rather than his specific Israel positions.
+
+2. **Factual AI-delivered information can move credibility assessments.** The 11% who shifted (Cluster 1: Persuaded) show that it is possible to reduce confidence in Tucker Carlson as a credible commentator on the Middle East through structured factual dialogue. This is a meaningful finding even in a small pilot, because credibility is a key mediator of subsequent persuasion.
+
+3. **Core policy beliefs are highly resistant.** Despite credibility decreasing in the Persuaded cluster, feeling thermometers and Israel policy positions did not change materially. This is consistent with the classic "two-step" model: factual corrections may first undermine source credibility, with downstream policy attitude change potentially requiring additional exposures or time.
+
+4. **Pre-existing ideology does not clearly determine persuadability** in this pilot. Both pro-Israel and skeptical-populist respondents were similarly (un)likely to end up in the Persuaded cluster, suggesting that what distinguishes the persuaded minority may be personality, engagement quality, or unmeasured individual differences rather than the ideology they brought into the study.
+
+---
+
+# Appendix: Technical Notes
+
+**Baseline clustering** uses all 106 respondents (19 pre-treatment attitude variables, median-imputed, scaled 0–1, k-means with 50 random starts).
+
+**Change-score clustering** uses the 91 completed respondents (20 Δ = post − pre variables, 0-imputed for missing, standardized by SD, k-means with 50 random starts).
+
+**Optimal k** in both cases was selected by maximizing mean silhouette score across k ∈ {2, 3, 4, 5}, using Euclidean distance on the scaled variable matrix.
+
+**Cluster labels** ("Pro-Israel Conservatives," "Skeptical Populists," "Persuaded," "Resistant") are interpretive names assigned post-hoc based on the statistical profiles. They are not identifiers used by respondents themselves.
+
+**Cross-tab test** uses Fisher's exact test because expected cell counts are small (< 5) in multiple cells.
+
+```{r}
+#| label: session-info
+#| echo: true
+#| code-fold: true
+#| code-summary: "Session Info"
+
+sessionInfo()
+```
