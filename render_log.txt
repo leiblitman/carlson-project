@@ -1,0 +1,86 @@
+
+
+processing file: carlson_audience_report.qmd
+1/55                       
+2/55 [setup]               
+3/55                       
+4/55 [demo-prep]           
+5/55                       
+6/55 [fig-demo]            
+7/55                       
+8/55 [tbl-demo-summary]    
+9/55                       
+10/55 [fig-engagement]      
+11/55                       
+12/55 [fig-commentators]    
+13/55                       
+14/55 [tbl-why-watch]       
+15/55                       
+16/55 [fig-conspiracy]      
+17/55                       
+18/55 [fig-fp-baseline]     
+19/55                       
+20/55 [fig-therm-baseline]  
+21/55                       
+22/55 [unnamed-chunk-1]     
+23/55                       
+24/55 [tbl-conditions]      
+25/55                       
+26/55 [tbl-cred]            
+27/55                       
+28/55 [tbl-fp]              
+29/55                       
+30/55 [tbl-therm]           
+31/55                       
+32/55 [tbl-tc-israel]       
+33/55                       
+34/55 [tbl-israel-policy]   
+35/55                       
+36/55 [fig-forest]          
+37/55                       
+38/55 [clustering-prep]     
+39/55                       
+40/55 [fig-silhouette]      
+41/55                       
+42/55 [fig-cluster-pca]     
+43/55                       
+44/55 [tbl-cluster-profiles]
+45/55                       
+46/55 [tbl-influence]       
+47/55                       
+48/55 [tbl-gets-right]      
+49/55                       
+50/55 [tbl-post-conv]       
+51/55                       
+52/55 [tbl-summary]         
+53/55                       
+54/55 [session-info]        
+55/55                       
+output file: carlson_audience_report.knit.md
+
+pandoc 
+  to: html
+  output-file: carlson_audience_report.html
+  standalone: true
+  embed-resources: true
+  section-divs: true
+  html-math-method: mathjax
+  wrap: none
+  default-image-extension: png
+  toc: true
+  toc-depth: 3
+  variables: {}
+  
+metadata
+  document-css: false
+  link-citations: true
+  date-format: long
+  lang: en
+  title: Understanding Tucker Carlson's Audience
+  subtitle: Beliefs, Attitudes, and the Effects of an AI-Delivered Factual Intervention — Pilot Report
+  date: today
+  toc-title: Table of Contents
+  theme: flatly
+  
+Output created: carlson_audience_report.html
+
