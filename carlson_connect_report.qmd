@@ -1281,7 +1281,430 @@ reg_results |>
 
 ---
 
-# 10 Key Findings
+# 10 Change Score Analysis
+
+This section examines *who* changes and *how much* in response to the AI conversation.
+Four questions are addressed:
+
+1. **What do the change score distributions look like?** (histograms)
+2. **Do the baseline attitude clusters differ in how much they change?**
+3. **Which demographic characteristics predict change?**
+4. **Are there distinct change-pattern clusters?** (independent k-means on Δ scores)
+
+```{r}
+#| label: change-prep
+
+# ── Define all 20 pre/post column pairs ──────────────────────────────────────
+ch_pre  <- c(cred_pre_cols, fp_pre_cols, therm_pre_cols, tc_pre_cols, ip_pre_cols)
+ch_post <- c(cred_post_cols, fp_post_cols, therm_post_cols, tc_post_cols, ip_post_cols)
+
+ch_labels <- c(
+  "Trust foreign policy",   "Gets facts right",    "Predictions accurate",
+  "Covers ignored topics",  "Challenges narratives","Gets things wrong",
+  "Russia provoked/NATO",   "Israel/AIPAC influence","Cut foreign funding",
+  "Israeli people (therm.)","Jewish people (therm.)","State of Israel (therm.)",
+  "Commentary accurate",    "Right questions",      "Too critical",
+  "Understands Middle East",
+  "US-Israel benefits US",  "Israel right to exist","Israel acts morally",
+  "Reduce military aid"
+)
+
+ch_domains <- c(
+  rep("Carlson Credibility",  6),
+  rep("Foreign Policy",       3),
+  rep("Feeling Thermometers", 3),
+  rep("Carlson on Israel",    4),
+  rep("Israel Policy",        4)
+)
+
+# ── Compute Δ = post − pre per row ───────────────────────────────────────────
+delta_mat <- map2_dfc(ch_pre, ch_post, function(p, q) {
+  suppressWarnings(as.numeric(df_c[[q]])) - suppressWarnings(as.numeric(df_c[[p]]))
+}) |> setNames(ch_labels)
+
+# ── Attach baseline cluster + demographics ───────────────────────────────────
+# km_final ran on df (all rows); we need only the completed-respondent rows.
+completed_idx    <- which(df[["Interview Status"]] == "Completed")
+baseline_cl_comp <- factor(km_final$cluster[completed_idx])
+
+delta_full <- delta_mat |>
+  mutate(
+    baseline_cluster = baseline_cl_comp,
+    party3   = analysis_df$party3,
+    ideology = analysis_df$ideology,
+    ideo_num = analysis_df$ideo_num,
+    age_num  = analysis_df$age_num,
+    race_grp = analysis_df$race_grp
+  )
+
+# Long format (for plotting)
+delta_long <- delta_full |>
+  pivot_longer(all_of(ch_labels), names_to = "item", values_to = "delta") |>
+  filter(!is.na(delta)) |>
+  mutate(
+    domain = ch_domains[match(item, ch_labels)],
+    item   = factor(item, levels = ch_labels),
+    domain = factor(domain, levels = c("Carlson Credibility","Foreign Policy",
+                                       "Feeling Thermometers","Carlson on Israel",
+                                       "Israel Policy"))
+  )
+```
+
+## 10.1 Distributions of Change Scores
+
+```{r}
+#| label: fig-change-hist
+#| fig-height: 10
+#| fig-cap: "Distribution of pre-to-post change scores (Δ = post − pre) for all 20 outcome items"
+
+delta_summary <- delta_long |>
+  group_by(domain, item) |>
+  summarise(M = mean(delta), .groups = "drop")
+
+delta_long |>
+  ggplot(aes(x = delta)) +
+  geom_histogram(binwidth = 10, fill = "#2c7bb6", color = "white", alpha = 0.8) +
+  geom_vline(data = delta_summary, aes(xintercept = M),
+             color = "#d7191c", linetype = "dashed", size = 0.8) +
+  geom_vline(xintercept = 0, color = "grey40", size = 0.5) +
+  scale_x_continuous(breaks = c(-50, 0, 50)) +
+  facet_wrap(~item, ncol = 4, scales = "free_y") +
+  labs(
+    title    = "Pre → Post Change Score Distributions",
+    subtitle = "0 = no change  |  red dashed = mean Δ",
+    x = "Δ (Post − Pre)", y = "Count"
+  ) +
+  theme_report() +
+  theme(strip.text = element_text(size = 7))
+```
+
+```{r}
+#| label: tbl-change-summary
+#| tbl-cap: "Change score summary statistics for all outcome items"
+
+delta_long |>
+  group_by(Domain = domain, Item = item) |>
+  summarise(
+    n         = n(),
+    `Mean Δ`  = round(mean(delta), 1),
+    `SD`      = round(sd(delta),   1),
+    `% Δ > 0` = paste0(round(mean(delta > 0) * 100, 0), "%"),
+    `% Δ < 0` = paste0(round(mean(delta < 0) * 100, 0), "%"),
+    .groups = "drop"
+  ) |>
+  kbl() |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, position = "left") |>
+  collapse_rows(columns = 1, valign = "top") |>
+  footnote(general = "% Δ > 0 = proportion who increased; % Δ < 0 = proportion who decreased.",
+           general_title = "")
+```
+
+## 10.2 Baseline Clusters and Change
+
+Do participants in different *baseline* attitude clusters (Section 7) respond differently to the AI conversation?
+
+```{r}
+#| label: fig-cluster-change
+#| fig-height: 8
+#| fig-cap: "Mean change score by baseline attitude cluster and outcome item"
+
+cluster_change <- delta_full |>
+  pivot_longer(all_of(ch_labels), names_to = "item", values_to = "delta") |>
+  filter(!is.na(delta)) |>
+  mutate(domain = ch_domains[match(item, ch_labels)],
+         item   = factor(item, levels = rev(ch_labels))) |>
+  group_by(baseline_cluster, domain, item) |>
+  summarise(M = mean(delta), SE = sd(delta)/sqrt(n()), .groups = "drop") |>
+  mutate(domain = factor(domain, levels = c("Carlson Credibility","Foreign Policy",
+                                            "Feeling Thermometers","Carlson on Israel",
+                                            "Israel Policy")))
+
+ggplot(cluster_change, aes(x = M, y = item, color = baseline_cluster,
+                            shape = baseline_cluster)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey60") +
+  geom_errorbarh(aes(xmin = M - 1.96*SE, xmax = M + 1.96*SE),
+                 height = 0.3, position = position_dodge(0.6)) +
+  geom_point(size = 2.8, position = position_dodge(0.6)) +
+  scale_color_manual(values = pal_main[1:best_k], name = "Baseline cluster") +
+  scale_shape_manual(values = c(16,17,15,18)[1:best_k], name = "Baseline cluster") +
+  facet_grid(domain ~ ., scales = "free_y", space = "free_y") +
+  labs(
+    title    = "Mean Change by Baseline Attitude Cluster",
+    subtitle = "Points = mean Δ; bars = 95% CI  |  0 = no change",
+    x = "Mean Change (Post − Pre)", y = NULL
+  ) +
+  theme_report() +
+  theme(strip.text.y = element_text(angle = 0, hjust = 0),
+        axis.text.y  = element_text(size = 8))
+```
+
+```{r}
+#| label: tbl-cluster-change-anova
+#| tbl-cap: "Does baseline cluster predict magnitude of change? One-way ANOVA per item."
+
+cluster_anova <- map_dfr(ch_labels, function(item) {
+  d <- delta_full |> filter(!is.na(.data[[item]]), !is.na(baseline_cluster))
+  if (n_distinct(d$baseline_cluster) < 2 || nrow(d) < 10) return(NULL)
+  aov_res <- aov(reformulate("baseline_cluster", response = item), data = d)
+  sm      <- summary(aov_res)[[1]]
+  tibble(
+    Item   = item,
+    Domain = ch_domains[match(item, ch_labels)],
+    F      = round(sm[["F value"]][1], 2),
+    p      = sm[["Pr(>F)"]][1],
+    sig    = sig_star(sm[["Pr(>F)"]][1])
+  )
+})
+
+cluster_anova |>
+  mutate(p = paste0(format(round(p, 3), nsmall = 3), " ", sig)) |>
+  select(-sig) |>
+  kbl(caption = "ANOVA: Baseline cluster × change score") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, position = "left") |>
+  collapse_rows(columns = 2, valign = "top") |>
+  footnote(general = "† p<.10, * p<.05, ** p<.01, *** p<.001.", general_title = "")
+```
+
+## 10.3 Demographic Predictors of Change
+
+OLS regressions with Δ (change score) as the outcome and party, ideology, age, and race as predictors.
+
+```{r}
+#| label: tbl-change-regression
+#| tbl-cap: "OLS regression: demographic predictors of change scores (ref: Republican, Very conservative, White)"
+
+reg_delta_df <- delta_full |>
+  mutate(
+    party3   = factor(party3,   levels = c("Republican","Ind./Other","Democrat")),
+    ideology = factor(ideology, levels = c("Very conservative","Somewhat conservative",
+                                           "Moderate","Somewhat liberal","Very liberal")),
+    race_grp = factor(race_grp, levels = c("White","Non-White"))
+  )
+
+delta_reg_results <- map_dfr(ch_labels, function(item) {
+  d   <- reg_delta_df |> filter(!is.na(.data[[item]]))
+  fml <- reformulate(c("party3","ideology","age_num","race_grp"), response = item)
+  m   <- lm(fml, data = d)
+  sm  <- summary(m)
+  est  <- coef(sm)[,"Estimate"]
+  pval <- coef(sm)[,"Pr(>|t|)"]
+
+  get <- function(nm) {
+    v <- est[nm]; p <- pval[nm]
+    if (is.na(v)) return("—")
+    paste0(round(v, 1), " ", sig_star(p))
+  }
+  tibble(
+    Item        = item,
+    Domain      = ch_domains[match(item, ch_labels)],
+    `Ind./Other`= get("party3Ind./Other"),
+    Democrat    = get("party3Democrat"),
+    Moderate    = get("ideologyModerate"),
+    `Smwt.lib.` = get("ideologySomewhat liberal"),
+    Age         = get("age_num"),
+    `Non-White` = get("race_grpNon-White"),
+    R2          = round(sm$r.squared, 2)
+  )
+})
+
+delta_reg_results |>
+  kbl(caption = "OLS Δ Regressions (ref: Republican, Very conservative, White)") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = TRUE) |>
+  add_header_above(c(" "=1," "=1,
+                     "Party (ref=Rep.)"=2,
+                     "Ideology (ref=Very con.)"=2,
+                     " "=1," "=1," "=1)) |>
+  collapse_rows(columns = 2, valign = "top") |>
+  footnote(general = "Coefficients = unstandardized B. † p<.10, * p<.05, ** p<.01, *** p<.001.",
+           general_title = "")
+```
+
+## 10.4 Cluster Analysis on Change Scores
+
+Independent k-means clustering on the 20 change score variables identifies **distinct change-pattern profiles** — groups of participants who changed in similar ways (or didn't change) across the outcome battery.
+
+```{r}
+#| label: change-cluster-prep
+
+# Build a complete-case change matrix for clustering
+delta_clust_mat <- delta_mat |>
+  mutate(across(everything(),
+                ~ifelse(is.na(.x), 0, .x))) |>   # impute no-change for missing
+  as.matrix()
+
+# Scale by SD so no single high-variance item dominates
+delta_scaled <- scale(delta_clust_mat)
+delta_scaled[!is.finite(delta_scaled)] <- 0       # guard against zero-variance cols
+
+# Silhouette analysis
+set.seed(42)
+delta_sil <- map_dbl(2:5, function(k) {
+  km <- kmeans(delta_scaled, centers = k, nstart = 25, iter.max = 100)
+  ss <- silhouette(km$cluster, dist(delta_scaled))
+  mean(ss[, 3])
+})
+
+best_k_delta <- which.max(delta_sil) + 1L
+km_delta     <- kmeans(delta_scaled, centers = best_k_delta,
+                        nstart = 50, iter.max = 100)
+```
+
+```{r}
+#| label: fig-change-sil
+#| fig-height: 3.5
+#| fig-cap: "Silhouette scores for change-score clustering"
+
+tibble(k = 2:5, silhouette = delta_sil) |>
+  ggplot(aes(x = k, y = silhouette)) +
+  geom_line(color = "#2c7bb6", size = 1.2) +
+  geom_point(size = 4, color = "#2c7bb6") +
+  geom_point(data = tibble(k = best_k_delta, silhouette = max(delta_sil)),
+             size = 6, shape = 21, color = "#d7191c", fill = NA, stroke = 2) +
+  scale_x_continuous(breaks = 2:5) +
+  labs(title = "Silhouette Analysis — Change Score Clusters",
+       subtitle = paste0("Best k = ", best_k_delta, " (circled)"),
+       x = "k", y = "Mean Silhouette") +
+  theme_report()
+```
+
+```{r}
+#| label: fig-change-cluster-pca
+#| fig-height: 5
+#| fig-cap: "Change-score clusters projected onto first two principal components"
+
+pca_delta  <- prcomp(delta_scaled, center = TRUE, scale. = FALSE)
+pca_ddf    <- as_tibble(pca_delta$x[, 1:2]) |>
+  mutate(cluster = factor(km_delta$cluster))
+var_exp_d  <- round(summary(pca_delta)$importance[2, 1:2] * 100, 1)
+
+pca_ddf |>
+  ggplot(aes(x = PC1, y = PC2, color = cluster, shape = cluster)) +
+  stat_ellipse(alpha = 0.15, aes(fill = cluster), geom = "polygon", type = "norm") +
+  geom_point(size = 3, alpha = 0.85) +
+  scale_color_manual(values = pal_main[1:best_k_delta], name = "Change cluster") +
+  scale_fill_manual(values  = pal_main[1:best_k_delta], name = "Change cluster") +
+  scale_shape_manual(values = c(16,17,15,18)[1:best_k_delta], name = "Change cluster") +
+  labs(
+    title    = paste0("Change-Score Clusters (k = ", best_k_delta, ")"),
+    subtitle = paste0("PC1 = ", var_exp_d[1], "% variance; PC2 = ", var_exp_d[2], "%"),
+    x = paste0("PC1 (", var_exp_d[1], "%)"),
+    y = paste0("PC2 (", var_exp_d[2], "%)")
+  ) +
+  theme_report()
+```
+
+```{r}
+#| label: tbl-change-cluster-profile
+#| tbl-cap: "Mean change score (Δ) by change cluster"
+
+delta_profile_tbl <- as_tibble(delta_clust_mat) |>
+  mutate(change_cluster = factor(km_delta$cluster)) |>
+  group_by(change_cluster) |>
+  summarise(n = n(), across(all_of(ch_labels), ~round(mean(.x, na.rm=TRUE), 1)),
+            .groups = "drop") |>
+  pivot_longer(-c(change_cluster, n), names_to = "Item", values_to = "Mean_delta") |>
+  mutate(Domain = ch_domains[match(Item, ch_labels)],
+         col_label = paste0("Cluster ", change_cluster, " (n=", n, ")")) |>
+  pivot_wider(id_cols = c(Domain, Item), names_from = col_label,
+              values_from = Mean_delta)
+
+delta_profile_tbl |>
+  kbl(caption = paste0("Mean Δ by Change Cluster (k = ", best_k_delta, ")")) |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = TRUE) |>
+  collapse_rows(columns = 1, valign = "top") |>
+  footnote(general = "Δ = post − pre. Negative = decreased; positive = increased.",
+           general_title = "")
+```
+
+```{r}
+#| label: fig-change-cluster-profile
+#| fig-height: 8
+#| fig-cap: "Change cluster mean profiles across all 20 outcome items"
+
+as_tibble(delta_clust_mat) |>
+  mutate(change_cluster = factor(km_delta$cluster)) |>
+  pivot_longer(all_of(ch_labels), names_to = "item", values_to = "delta") |>
+  group_by(change_cluster, item) |>
+  summarise(M = mean(delta), SE = sd(delta)/sqrt(n()), .groups = "drop") |>
+  mutate(
+    domain = ch_domains[match(item, ch_labels)],
+    item   = factor(item, levels = rev(ch_labels)),
+    domain = factor(domain, levels = c("Carlson Credibility","Foreign Policy",
+                                       "Feeling Thermometers","Carlson on Israel",
+                                       "Israel Policy"))
+  ) |>
+  ggplot(aes(x = M, y = item, color = change_cluster, shape = change_cluster)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey60") +
+  geom_errorbarh(aes(xmin = M - 1.96*SE, xmax = M + 1.96*SE),
+                 height = 0.3, position = position_dodge(0.6)) +
+  geom_point(size = 2.8, position = position_dodge(0.6)) +
+  scale_color_manual(values = pal_main[1:best_k_delta], name = "Change cluster") +
+  scale_shape_manual(values = c(16,17,15,18)[1:best_k_delta], name = "Change cluster") +
+  facet_grid(domain ~ ., scales = "free_y", space = "free_y") +
+  labs(
+    title    = "Change Cluster Profiles",
+    subtitle = "Points = mean Δ; bars = 95% CI  |  0 = no change",
+    x = "Mean Change (Post − Pre)", y = NULL
+  ) +
+  theme_report() +
+  theme(strip.text.y = element_text(angle = 0, hjust = 0),
+        axis.text.y  = element_text(size = 8))
+```
+
+```{r}
+#| label: tbl-cluster-crosstab
+#| tbl-cap: "Cross-tabulation: baseline attitude clusters × change-score clusters"
+
+with(
+  tibble(
+    `Baseline cluster` = baseline_cl_comp,
+    `Change cluster`   = factor(km_delta$cluster)
+  ),
+  table(`Baseline cluster`, `Change cluster`)
+) |>
+  as.data.frame.matrix() |>
+  rownames_to_column("Baseline cluster") |>
+  rename_with(~paste0("Change cl. ", .), -1) |>
+  kbl(caption = "Cross-tab: Baseline Attitude Clusters × Change-Score Clusters") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, position = "left") |>
+  footnote(general = "Cell values = n. Check for non-random associations between baseline position and change pattern.",
+           general_title = "")
+```
+
+```{r}
+#| label: tbl-change-cluster-demo
+#| tbl-cap: "Demographic composition of change-score clusters"
+
+tibble(
+  change_cluster = factor(km_delta$cluster),
+  party3         = analysis_df$party3,
+  ideology       = analysis_df$ideology,
+  age_num        = analysis_df$age_num
+) |>
+  group_by(change_cluster) |>
+  summarise(
+    n             = n(),
+    `% Republican`= paste0(round(mean(party3 == "Republican", na.rm=TRUE)*100, 0), "%"),
+    `% Democrat`  = paste0(round(mean(party3 == "Democrat",   na.rm=TRUE)*100, 0), "%"),
+    `% Very/Smwt. Conservative` = paste0(
+      round(mean(ideology %in% c("Very conservative","Somewhat conservative"),
+                 na.rm=TRUE)*100, 0), "%"),
+    `Mean Age`    = round(mean(age_num, na.rm=TRUE), 1)
+  ) |>
+  rename(`Change Cluster` = change_cluster) |>
+  kbl(caption = "Demographic Profile of Change Clusters") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, position = "left")
+```
+
+---
+
+# 11 Key Findings
 
 ```{r}
 #| label: tbl-summary
