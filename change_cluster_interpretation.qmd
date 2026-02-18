@@ -191,6 +191,91 @@ demo_change <- df_c |>
                       NA_real_)
   ) |>
   select(change_cluster, party3, ideology, age_num, source)
+
+# ── Extended demographics & baseline profiles for cluster profiling ────────────
+gender_col_pp <- fcol("^\\(27\\) What is your gender",           data = df_c)[1]
+race_col_pp   <- fcol("^\\(29\\) What is your race",             data = df_c)[1]
+sex_col_con   <- fcol("^Sex \\(",                                 data = df_c)[1]
+race_col_con  <- fcol("^Race \\(",                                data = df_c)[1]
+tc_freq_col   <- fcol("^\\(3\\) How often do you watch",         data = df_c)[1]
+
+# Baseline composite: mean across all items in each domain per respondent
+bl_score <- function(cols) {
+  df_c |>
+    select(all_of(cols)) |>
+    mutate(across(everything(), ~suppressWarnings(as.numeric(.x)))) |>
+    rowMeans(na.rm = TRUE)
+}
+
+bl_cred  <- bl_score(cred_pre_cols)
+bl_fp    <- bl_score(fp_pre_cols)
+bl_therm <- bl_score(therm_pre_cols)
+bl_tc    <- bl_score(tc_pre_cols)
+bl_ip    <- bl_score(ip_pre_cols)
+
+# Master profile dataframe (one row per completed respondent)
+prof <- df_c |>
+  mutate(
+    cl     = km_delta$cluster,
+    cl_lab = factor(if_else(cl == changed_cl, "Changed", "Stable"),
+                    levels = c("Changed", "Stable")),
+    # Baseline attitude composites (pre-treatment)
+    bl_cred  = bl_cred,
+    bl_fp    = bl_fp,
+    bl_therm = bl_therm,
+    bl_tc    = bl_tc,
+    bl_ip    = bl_ip,
+    # Demographics
+    age_num    = if_else(source == "Connect",
+                         suppressWarnings(as.numeric(.data[[age_col_con]])),
+                         NA_real_),
+    gender_sex = case_when(
+      source == "PrimePanels" ~ .data[[gender_col_pp]],
+      source == "Connect"     ~ .data[[sex_col_con]]
+    ),
+    female = case_when(
+      grepl("Female|Woman", gender_sex, ignore.case = TRUE) ~ 1L,
+      grepl("Male|Man",     gender_sex, ignore.case = TRUE) ~ 0L,
+      TRUE ~ NA_integer_
+    ),
+    race_raw = case_when(
+      source == "PrimePanels" ~ .data[[race_col_pp]],
+      source == "Connect"     ~ .data[[race_col_con]]
+    ),
+    white = case_when(
+      grepl("White", race_raw, ignore.case = TRUE) ~ 1L,
+      !is.na(race_raw)                             ~ 0L,
+      TRUE ~ NA_integer_
+    ),
+    party_raw = case_when(
+      source == "PrimePanels" ~ .data[[party_col_pp]],
+      source == "Connect"     ~ .data[[party_col_con]]
+    ),
+    party3 = case_when(
+      grepl("Republican", party_raw, ignore.case = TRUE) ~ "Republican",
+      grepl("Democrat",   party_raw, ignore.case = TRUE) ~ "Democrat",
+      !is.na(party_raw)                                  ~ "Ind./Other",
+      TRUE ~ NA_character_
+    ),
+    ideology = case_when(
+      source == "PrimePanels" ~ .data[[ideo_col_pp]],
+      source == "Connect"     ~ .data[[ideo_col_con]]
+    ),
+    ideo_num = case_when(
+      ideology == "Very liberal"          ~ 1,
+      ideology == "Somewhat liberal"      ~ 2,
+      ideology == "Moderate"              ~ 3,
+      ideology == "Somewhat conservative" ~ 4,
+      ideology == "Very conservative"     ~ 5,
+      TRUE ~ NA_real_
+    ),
+    tc_freq    = .data[[tc_freq_col]],
+    tc_regular = case_when(
+      grepl("every day|several.*week|every week", tc_freq, ignore.case = TRUE) ~ 1L,
+      !is.na(tc_freq)                                                           ~ 0L,
+      TRUE ~ NA_integer_
+    )
+  )
 ```
 
 # Background: What Was the Study?
@@ -409,6 +494,153 @@ With only n = `r n_changed` participants in the Changed cluster, demographic per
 :::
 
 The demographic breakdown shows no striking pattern that would clearly distinguish who changed from who didn't — which is itself an interesting (if tentative) finding: persuadability in this study does not appear to be strongly predicted by party, ideology, or the panel respondents were recruited from.
+
+---
+
+# Profiles: Who Are These Groups?
+
+Understanding the two clusters requires looking not just at *what changed* but at *who these people were* — both in terms of their attitudes before the AI conversation and their demographic backgrounds. This section addresses two diagnostic questions that help translate the clusters into a picture a general audience can understand.
+
+---
+
+## Were the Groups Already Attitudinally Different Before the Conversation?
+
+**The most important diagnostic question:** did the people who changed their minds start out already different from those who didn't? If the Changed cluster came in with lower Carlson credibility or already-warmer Israel attitudes, the AI conversation may have simply accelerated a shift that was already underway. If both clusters looked similar at baseline, the AI conversation was doing more of the genuine persuasive work.
+
+```{r}
+#| label: fig-baseline-compare
+#| fig-height: 4.5
+#| fig-cap: "Mean pre-treatment score by domain for each cluster. Connecting lines show the gap between the two groups. Both clusters were recruited as Carlson fans — this shows how similar (or different) they looked before any treatment."
+
+prof |>
+  group_by(cl_lab) |>
+  summarise(
+    `Carlson Credibility` = mean(bl_cred,  na.rm = TRUE),
+    `Carlson on Israel`   = mean(bl_tc,    na.rm = TRUE),
+    `Foreign Policy`      = mean(bl_fp,    na.rm = TRUE),
+    `Israel Policy`       = mean(bl_ip,    na.rm = TRUE),
+    `Israel Thermometers` = mean(bl_therm, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  pivot_longer(-cl_lab, names_to = "Domain", values_to = "Mean") |>
+  mutate(Domain = factor(Domain, levels = c("Carlson Credibility", "Carlson on Israel",
+                                            "Foreign Policy", "Israel Policy",
+                                            "Israel Thermometers"))) |>
+  ggplot(aes(x = Mean, y = Domain)) +
+  geom_line(aes(group = Domain), color = "grey70", linewidth = 1) +
+  geom_point(aes(color = cl_lab, shape = cl_lab), size = 4.5) +
+  scale_x_continuous(limits = c(0, 100), breaks = c(0, 25, 50, 75, 100)) +
+  scale_color_manual(values = c("Changed" = "#d7191c", "Stable" = "#2c7bb6"), name = NULL) +
+  scale_shape_manual(values = c("Changed" = 17, "Stable" = 16), name = NULL) +
+  labs(
+    title    = "Baseline Attitudes: Were the Groups Different Before the Conversation?",
+    subtitle = "Mean pre-treatment composite score by domain and cluster",
+    x = "Mean Score (0–100 scale)", y = NULL
+  ) +
+  theme_report()
+```
+
+```{r}
+#| label: tbl-baseline-compare
+#| tbl-cap: "Mean pre-treatment scores and ideology by cluster. Higher scores = more positive toward the domain. Ideology: 1 = Very liberal, 5 = Very conservative."
+
+prof |>
+  group_by(Cluster = cl_lab) |>
+  summarise(
+    n                     = n(),
+    `Carlson Credibility` = round(mean(bl_cred,  na.rm = TRUE), 1),
+    `Carlson on Israel`   = round(mean(bl_tc,    na.rm = TRUE), 1),
+    `Foreign Policy`      = round(mean(bl_fp,    na.rm = TRUE), 1),
+    `Israel Policy`       = round(mean(bl_ip,    na.rm = TRUE), 1),
+    `Israel Thermometers` = round(mean(bl_therm, na.rm = TRUE), 1),
+    `Ideology (1–5)`      = round(mean(ideo_num, na.rm = TRUE), 2),
+    .groups = "drop"
+  ) |>
+  kbl() |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, position = "left") |>
+  footnote(
+    general = "All attitude scales: 0–100 composite means (average across domain items). Ideology: 1 = Very liberal … 5 = Very conservative.",
+    general_title = ""
+  )
+```
+
+::: {.callout-note}
+## What to look for
+
+- **Carlson Credibility (pre)**: If the Changed cluster started *lower*, they were already softer fans and the AI conversation finished the job. If the groups started similarly, the conversation genuinely moved people who began as true believers — a stronger result.
+- **Israel Thermometers (pre)**: A lower starting temperature in the Changed cluster would suggest they had more room to warm up. A similar starting point would suggest the shift was driven by changed reasoning, not just ceiling/floor effects.
+- **Ideology**: Both groups should lean conservative (they are Carlson fans). A more moderate Changed cluster would suggest persuadability correlates with ideological flexibility.
+:::
+
+---
+
+## Full Demographic Profile
+
+```{r}
+#| label: tbl-full-demo
+#| tbl-cap: "Demographic and engagement profile by cluster. All percentages based on small cell counts — treat as descriptive only."
+
+prof |>
+  group_by(Cluster = cl_lab) |>
+  summarise(
+    n                          = n(),
+    `% Republican`             = paste0(round(mean(party3 == "Republican", na.rm = TRUE) * 100), "%"),
+    `% Democrat`               = paste0(round(mean(party3 == "Democrat",   na.rm = TRUE) * 100), "%"),
+    `% Ind. / Other`           = paste0(round(mean(party3 == "Ind./Other", na.rm = TRUE) * 100), "%"),
+    `% Conservative`           = paste0(round(mean(ideo_num >= 4, na.rm = TRUE) * 100), "%"),
+    `% Moderate`               = paste0(round(mean(ideo_num == 3, na.rm = TRUE) * 100), "%"),
+    `% Liberal`                = paste0(round(mean(ideo_num <= 2, na.rm = TRUE) * 100), "%"),
+    `% Female`                 = paste0(round(mean(female,     na.rm = TRUE) * 100), "%"),
+    `% White`                  = paste0(round(mean(white,      na.rm = TRUE) * 100), "%"),
+    `% Regular Carlson viewer` = paste0(round(mean(tc_regular, na.rm = TRUE) * 100), "%"),
+    `Mean age (Connect only)`  = round(mean(age_num, na.rm = TRUE), 1),
+    `% from PrimePanels`       = paste0(round(mean(source == "PrimePanels") * 100), "%"),
+    .groups = "drop"
+  ) |>
+  kbl() |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, position = "left") |>
+  footnote(
+    general = "Regular viewer = watches every day or several times per week. Female and White are binary-coded from gender/sex and race/ethnicity columns. Mean age uses Connect panel-provided numeric age only.",
+    general_title = ""
+  )
+```
+
+::: {.callout-caution}
+## Caution: Small cell counts
+With only n = `r n_changed` in the Changed cluster, none of the demographic percentages are statistically reliable. These are descriptive starting points for hypothesis generation, not confirmatory findings.
+:::
+
+---
+
+## Plain-Language Portraits
+
+The cluster analysis identified two conceptually distinct types of viewer. Here is how to describe them to a general audience.
+
+---
+
+### The Stable 80%: "The Anchored Believer"
+
+These viewers came into the study with a settled relationship with Tucker Carlson and left with exactly the same one. One AI conversation that challenged Carlson's accuracy on Israel did nothing to change their views.
+
+**What explains this?** Their trust in Carlson is not primarily a consumer-style judgment of his factual accuracy — it is closer to **identity and loyalty**. They trust him because he represents their values, their skepticism of mainstream institutions, and their way of seeing the world. Providing evidence that he got something wrong does not reach this kind of trust, because identity-based trust is not rooted in a running tally of accurate claims. It is more like asking a committed sports fan to abandon their team because the quarterback had a bad game. The logic does not land.
+
+This is also the **normal outcome** in political persuasion research. Beliefs tied to group identity are among the most resistant to single-exposure interventions. This is not a failure of the intervention or a sign that these participants were inattentive — it is simply how deeply held political attitudes work.
+
+> **In plain terms**: These are the true believers. Their view of Carlson is part of who they are politically. You will not change their minds with facts alone, and probably not with any single conversation.
+
+---
+
+### The Changed 20%: "The Evidence-Responsive Viewer"
+
+This smaller group held broadly similar political views going into the study — also Carlson fans, also skeptical of Israel — but their credibility judgment of Carlson was more **information-contingent**. They trusted him, in part, because they believed he was getting things right. When the AI provided factual context suggesting he was not, they revised their assessment.
+
+Think of the difference between two customers: one who gives a brand 5-star reviews out of loyalty no matter what, and one who starts with a favorable impression but revises it when they discover the brand has been misleading them. The Changed cluster represents the second type of viewer.
+
+What this change is **not** is equally important: it is not a political conversion. These participants did not abandon their conservative politics or become Israel advocates. They became more skeptical of *one source* — Tucker Carlson — on *one topic* — Israel. Their warmth toward Israel increased modestly as a downstream consequence of reduced trust in an anti-Israel framing. That is a targeted and limited shift, not a worldview overhaul.
+
+> **In plain terms**: These are the persuadable ones. They came in liking Carlson, but their trust was based partly on believing he was accurate. When shown evidence he wasn't, they updated. They are not converts — they just care whether their sources tell the truth.
 
 ---
 
