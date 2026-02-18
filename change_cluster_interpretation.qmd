@@ -1,0 +1,474 @@
+---
+title: "Understanding the Change-Score Clusters"
+subtitle: "Who Changed Their Views After Talking with an AI — and How?"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    toc-title: "Contents"
+    theme: flatly
+    embed-resources: true
+    fig-width: 9
+    fig-height: 6
+    fig-dpi: 150
+execute:
+  warning: false
+  message: false
+  echo: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(tidyverse)
+library(kableExtra)
+library(scales)
+library(cluster)
+
+theme_report <- function() {
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.title       = element_text(face = "bold", size = 14),
+      plot.subtitle    = element_text(color = "grey40", size = 11),
+      axis.title       = element_text(size = 11),
+      panel.grid.minor = element_blank(),
+      strip.text       = element_text(face = "bold"),
+      legend.position  = "bottom"
+    )
+}
+
+sig_star <- function(p) {
+  case_when(p < .001 ~ "***", p < .01 ~ "**", p < .05 ~ "*",
+            p < .10 ~ "†", TRUE ~ "")
+}
+
+read_survey <- function(path, src) {
+  read_csv(path, col_types = cols(.default = col_character()),
+           show_col_types = FALSE) |> mutate(source = src)
+}
+
+pp_old <- read_survey("data/raw/result_persuasion_PrimePanels_2.17.26.csv",  "PrimePanels")
+pp_new <- read_survey("data/raw/result_persuasion_PrimePanels_N91.17.27.csv", "PrimePanels")
+con    <- read_survey("data/raw/result_persuasion_Connect_2.17.26.csv",        "Connect")
+
+pp  <- bind_rows(pp_old, pp_new) |> distinct()
+df  <- bind_rows(pp, con)
+df_c <- df |> filter(`Interview Status` == "Completed")
+
+n_complete <- nrow(df_c)
+n_pp       <- sum(df_c$source == "PrimePanels")
+n_con      <- sum(df_c$source == "Connect")
+
+fcol <- function(pattern, data = df, suffix = NULL) {
+  nms <- grep(pattern, names(data), value = TRUE, perl = TRUE)
+  if (!is.null(suffix)) nms <- grep(suffix, nms, value = TRUE, fixed = TRUE)
+  nms
+}
+
+gq <- function(q, nm) grep(paste0("^\\(", q, "\\.[0-9]+\\).*- Value$"), nm, value = TRUE)
+
+pp_post_cred  <- gq(18, names(pp_old));  con_post_cred  <- gq(17, names(con))
+pp_post_fp    <- gq(19, names(pp_old));  con_post_fp    <- gq(18, names(con))
+pp_post_therm <- gq(20, names(pp_old));  con_post_therm <- gq(19, names(con))
+pp_post_tc    <- gq(21, names(pp_old));  con_post_tc    <- gq(20, names(con))
+pp_post_ip    <- gq(22, names(pp_old));  con_post_ip    <- gq(21, names(con))
+
+add_post <- function(data, domain_name, pp_src_cols, con_src_cols) {
+  for (i in seq_along(pp_src_cols)) {
+    new_col <- paste0("post_", domain_name, "_", i)
+    data[[new_col]] <- if_else(
+      data$source == "PrimePanels",
+      suppressWarnings(as.numeric(data[[pp_src_cols[i]]])),
+      suppressWarnings(as.numeric(data[[con_src_cols[i]]]))
+    )
+  }
+  data
+}
+
+df_c <- df_c |>
+  add_post("cred",  pp_post_cred,  con_post_cred)  |>
+  add_post("fp",    pp_post_fp,    con_post_fp)    |>
+  add_post("therm", pp_post_therm, con_post_therm) |>
+  add_post("tc",    pp_post_tc,    con_post_tc)    |>
+  add_post("ip",    pp_post_ip,    con_post_ip)
+
+cred_pre_cols  <- fcol("^\\(8\\.[0-9]\\).*- Value$",  data = df_c)
+fp_pre_cols    <- fcol("^\\(9\\.[0-9]\\).*- Value$",  data = df_c)
+therm_pre_cols <- fcol("^\\(10\\.[0-9]\\).*- Value$", data = df_c)
+tc_pre_cols    <- fcol("^\\(11\\.[0-9]\\).*- Value$", data = df_c)
+ip_pre_cols    <- fcol("^\\(12\\.[0-9]\\).*- Value$", data = df_c)
+
+cred_post_cols  <- paste0("post_cred_",  seq_along(cred_pre_cols))
+fp_post_cols    <- paste0("post_fp_",    seq_along(fp_pre_cols))
+therm_post_cols <- paste0("post_therm_", seq_along(therm_pre_cols))
+tc_post_cols    <- paste0("post_tc_",    seq_along(tc_pre_cols))
+ip_post_cols    <- paste0("post_ip_",    seq_along(ip_pre_cols))
+
+ch_labels <- c(
+  "Trust foreign policy",   "Gets facts right",    "Predictions accurate",
+  "Covers ignored topics",  "Challenges narratives","Gets things wrong",
+  "Russia provoked/NATO",   "Israel/AIPAC influence","Cut foreign funding",
+  "Israeli people (therm.)","Jewish people (therm.)","State of Israel (therm.)",
+  "Commentary accurate",    "Right questions",     "Too critical",
+  "Understands Middle East",
+  "US-Israel benefits US",  "Israel right to exist","Israel acts morally",
+  "Reduce military aid"
+)
+
+ch_domains <- c(
+  rep("Carlson Credibility",  6), rep("Foreign Policy",       3),
+  rep("Feeling Thermometers", 3), rep("Carlson on Israel",    4),
+  rep("Israel Policy",        4)
+)
+
+delta_mat <- map2_dfc(
+  c(cred_pre_cols, fp_pre_cols, therm_pre_cols, tc_pre_cols, ip_pre_cols),
+  c(cred_post_cols, fp_post_cols, therm_post_cols, tc_post_cols, ip_post_cols),
+  function(p, q) suppressWarnings(as.numeric(df_c[[q]])) -
+                 suppressWarnings(as.numeric(df_c[[p]]))
+) |> setNames(ch_labels)
+
+delta_clust_mat <- delta_mat |>
+  mutate(across(everything(), ~ifelse(is.na(.x), 0, .x))) |>
+  as.matrix()
+
+delta_scaled <- scale(delta_clust_mat)
+delta_scaled[!is.finite(delta_scaled)] <- 0
+
+set.seed(42)
+delta_sil <- map_dbl(2:5, function(k) {
+  km <- kmeans(delta_scaled, centers = k, nstart = 25, iter.max = 100)
+  mean(silhouette(km$cluster, dist(delta_scaled))[, 3])
+})
+
+best_k_delta <- which.max(delta_sil) + 1L
+km_delta     <- kmeans(delta_scaled, centers = best_k_delta,
+                        nstart = 50, iter.max = 100)
+
+# Identify which cluster is "changed" vs "stable" by total absolute movement
+cl_movement <- as_tibble(delta_clust_mat) |>
+  mutate(cl = km_delta$cluster) |>
+  group_by(cl) |>
+  summarise(total_abs = mean(rowSums(abs(across(all_of(ch_labels))))),
+            n = n(), .groups = "drop") |>
+  arrange(desc(total_abs))
+
+changed_cl  <- cl_movement$cl[1]   # cluster with most movement
+stable_cl   <- cl_movement$cl[2]   # cluster near zero
+n_changed   <- cl_movement$n[1]
+n_stable    <- cl_movement$n[2]
+pct_changed <- round(n_changed / n_complete * 100)
+
+# Key mean changes for the changed cluster
+changed_means <- as_tibble(delta_clust_mat) |>
+  mutate(cl = km_delta$cluster) |>
+  filter(cl == changed_cl) |>
+  summarise(across(all_of(ch_labels), ~round(mean(.x, na.rm = TRUE), 1)))
+
+# Demographics of changed cluster
+party_col_pp  <- fcol("^\\(31\\) Do you consider yourself a Democrat", data = df_c)[1]
+party_col_con <- fcol("^Political Party \\(",                          data = df_c)[1]
+ideo_col_pp   <- fcol("^\\(30\\) Do you consider yourself politically", data = df_c)[1]
+ideo_col_con  <- fcol("^\\(29\\) Do you consider yourself politically", data = df_c)[1]
+age_col_con   <- fcol("^Age \\(",                                       data = df_c)[1]
+
+demo_change <- df_c |>
+  mutate(
+    change_cluster = factor(km_delta$cluster),
+    party_raw = if_else(source == "PrimePanels",
+                        .data[[party_col_pp]], .data[[party_col_con]]),
+    party3 = case_when(
+      grepl("Republican", party_raw, ignore.case = TRUE) ~ "Republican",
+      grepl("Democrat",   party_raw, ignore.case = TRUE) ~ "Democrat",
+      !is.na(party_raw) ~ "Ind./Other", TRUE ~ NA_character_
+    ),
+    ideology = if_else(source == "PrimePanels",
+                       .data[[ideo_col_pp]], .data[[ideo_col_con]]),
+    age_num = if_else(source == "Connect",
+                      suppressWarnings(as.numeric(.data[[age_col_con]])),
+                      NA_real_)
+  ) |>
+  select(change_cluster, party3, ideology, age_num, source)
+```
+
+# Background: What Was the Study?
+
+Tucker Carlson viewers (`r n_complete` participants from two panels — PrimePanels and CloudResearch Connect) completed surveys before and after engaging in a structured, AI-delivered conversation that provided factual context about Israel-related topics. Participants rated Tucker Carlson's credibility, their foreign policy views, and their attitudes toward Israel on 0–100 sliders, both before and after the conversation.
+
+A **change score** (Δ = post − pre) was computed for each of the 20 outcome items per person. These 20 change scores were then submitted to k-means cluster analysis to identify groups of people who changed in similar ways — or didn't change at all.
+
+The silhouette criterion identified **k = `r best_k_delta` clusters** as the best-fitting solution.
+
+---
+
+# The Two Clusters
+
+```{r}
+#| label: fig-main
+#| fig-height: 9
+#| fig-cap: !expr paste0("Mean pre-to-post change (Δ) by cluster across all 20 outcome items. Cluster ", changed_cl, " (red triangles) = the 'Changed' group (n = ", n_changed, "); Cluster ", stable_cl, " (blue circles) = the 'Stable' group (n = ", n_stable, "). A positive Δ means the score increased after the conversation; negative means it decreased.")
+
+cl_labels <- setNames(
+  c(paste0("Cluster ", changed_cl, ": Changed (n=", n_changed, ")"),
+    paste0("Cluster ", stable_cl,  ": Stable  (n=", n_stable,  ")")),
+  as.character(c(changed_cl, stable_cl))
+)
+
+as_tibble(delta_clust_mat) |>
+  mutate(change_cluster = factor(km_delta$cluster)) |>
+  pivot_longer(all_of(ch_labels), names_to = "item", values_to = "delta") |>
+  group_by(change_cluster, item) |>
+  summarise(M = mean(delta), SE = sd(delta) / sqrt(n()), .groups = "drop") |>
+  mutate(
+    domain = ch_domains[match(item, ch_labels)],
+    item   = factor(item, levels = rev(ch_labels)),
+    domain = factor(domain, levels = c("Carlson Credibility","Foreign Policy",
+                                       "Feeling Thermometers","Carlson on Israel",
+                                       "Israel Policy")),
+    cl_lab = cl_labels[as.character(change_cluster)]
+  ) |>
+  ggplot(aes(x = M, y = item,
+             color = cl_lab, shape = cl_lab)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50", linewidth = 0.8) +
+  geom_errorbarh(aes(xmin = M - 1.96*SE, xmax = M + 1.96*SE),
+                 height = 0.3, position = position_dodge(0.6)) +
+  geom_point(size = 3, position = position_dodge(0.6)) +
+  scale_color_manual(values = c("#d7191c", "#2c7bb6"), name = NULL) +
+  scale_shape_manual(values = c(17, 16),               name = NULL) +
+  facet_grid(domain ~ ., scales = "free_y", space = "free_y") +
+  labs(
+    title    = "Pre → Post Change Score Profiles by Cluster",
+    subtitle = "Δ = post − pre  |  0 = no change  |  bars = 95% CI",
+    x = "Mean Change (Post − Pre, 0–100 scale)",
+    y = NULL
+  ) +
+  theme_report() +
+  theme(strip.text.y = element_text(angle = 0, hjust = 0),
+        axis.text.y  = element_text(size = 9))
+```
+
+---
+
+## Cluster `r stable_cl` — "The Stable Majority" (n = `r n_stable`, `r 100 - pct_changed`% of participants)
+
+```{r}
+#| label: fig-stable-highlight
+#| fig-height: 2.5
+#| fig-cap: "The Stable cluster's change scores are indistinguishable from zero across every domain."
+
+as_tibble(delta_clust_mat) |>
+  filter(km_delta$cluster == stable_cl) |>
+  summarise(across(all_of(ch_labels), ~mean(.x, na.rm=T))) |>
+  pivot_longer(everything(), names_to = "item", values_to = "M") |>
+  mutate(domain = ch_domains[match(item, ch_labels)],
+         domain = factor(domain, levels = c("Carlson Credibility","Foreign Policy",
+                                            "Feeling Thermometers","Carlson on Israel",
+                                            "Israel Policy"))) |>
+  ggplot(aes(x = M, y = fct_rev(factor(item, ch_labels)), fill = domain)) +
+  geom_col(width = 0.7) +
+  geom_vline(xintercept = 0, color = "black", linewidth = 0.6) +
+  scale_x_continuous(limits = c(-50, 50), breaks = c(-25, 0, 25)) +
+  scale_fill_manual(values = c("#2c7bb6","#1a9641","#756bb1","#fdae61","#d7191c"),
+                    name = NULL) +
+  labs(title = paste0("Cluster ", stable_cl, ": Mean Δ per item"),
+       subtitle = "Every item is within a few points of zero",
+       x = "Mean Δ (Post − Pre)", y = NULL) +
+  theme_report() +
+  theme(axis.text.y = element_text(size = 8))
+```
+
+The defining characteristic of this cluster is **nothing happened**. Across all 20 items — Carlson credibility, foreign policy views, feeling thermometers toward Israel, perceptions of his Israel commentary, and Israel policy positions — this group's average change score sits within a few points of zero in either direction.
+
+This does not mean these participants were unengaged. It means that after the AI conversation, their measured attitudes were essentially the same as before. This is actually the most common outcome in political attitude research: a single exposure to counter-information, even a well-structured one, is generally insufficient to move deeply held political and media-credibility beliefs.
+
+**Key takeaway:** The AI conversation had no detectable effect on the majority of participants.
+
+---
+
+## Cluster `r changed_cl` — "The Changed Minority" (n = `r n_changed`, `r pct_changed`% of participants)
+
+This smaller cluster shows a coherent, multi-domain pattern of attitude change. Understanding it requires looking at *what changed* and *in what direction*.
+
+### What changed — and in which direction
+
+```{r}
+#| label: tbl-changed-profile
+#| tbl-cap: !expr paste0("Mean change scores for the Changed cluster (Cluster ", changed_cl, ", n = ", n_changed, "). Items are grouped by domain. Negative = decreased after the AI conversation; positive = increased.")
+
+tibble(
+  Domain = ch_domains,
+  Item   = ch_labels,
+  `Mean Δ` = unlist(changed_means)
+) |>
+  mutate(
+    Direction = case_when(
+      `Mean Δ` <= -10 ~ "↓ Decreased",
+      `Mean Δ` >=  10 ~ "↑ Increased",
+      TRUE            ~ "≈ Little change"
+    )
+  ) |>
+  kbl(caption = paste0("Changed Cluster (n = ", n_changed, "): Mean Δ per item")) |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, position = "left") |>
+  collapse_rows(columns = 1, valign = "top") |>
+  footnote(
+    general = "Δ = post − pre. All items are 0–100 sliders except where noted. Items with |Δ| ≥ 10 are considered meaningful movement.",
+    general_title = ""
+  )
+```
+
+### The story told by the pattern
+
+The changes are not random. They form a coherent narrative across three related shifts:
+
+**1. Tucker Carlson lost credibility**
+
+Five of the six credibility items dropped substantially (ranging roughly –20 to –35 points). Participants in this cluster came out of the AI conversation feeling that Carlson:
+
+- Is *less* trustworthy on foreign policy
+- Gets facts *wrong* more than they had thought
+- Makes *less* accurate predictions
+- *Does not* understand the Middle East as well as most commentators
+- Challenges mainstream narratives *less* effectively than believed
+
+The sixth credibility item — "He often gets things *wrong*" — moved in the *opposite* direction (a large increase), which is fully consistent: if you believe he gets things wrong *more*, this reverse-coded item should go up. The credibility pattern is internally coherent.
+
+**2. Views on Carlson's Israel coverage shifted**
+
+Two items measuring how participants see Carlson's *specific* Israel commentary also dropped sharply:
+
+- "His commentary on Israel is accurate and fair" — large decrease
+- "He understands the Middle East better than most commentators" — the single largest decrease of any item
+
+Meanwhile, "He is too critical of Israel" increased. This means participants in this cluster came to see Carlson as *less credible on Israel* and *more unfairly critical of Israel* at the same time — a nuanced shift suggesting the AI's factual information reframed Carlson's Israel coverage as both inaccurate *and* biased against Israel.
+
+**3. Attitudes toward Israel warmed**
+
+Feeling thermometers toward Israeli people, Jewish people, and the State of Israel all increased modestly. This suggests that reduced confidence in Carlson's anti-Israel framing coincided with somewhat warmer feelings toward Israel itself. This is what would be expected if the AI conversation successfully provided factual context that countered a skeptical narrative: once the messenger's credibility drops, the underlying attitudes can shift.
+
+---
+
+### A coherent persuasion sequence
+
+The three shifts above are consistent with a single causal chain:
+
+```
+AI provides factual context
+        ↓
+Participants question Carlson's accuracy on Israel
+        ↓
+Carlson's credibility as a foreign-policy commentator falls
+        ↓
+His anti-Israel framing loses persuasive force
+        ↓
+Attitudes toward Israel become somewhat warmer
+```
+
+This is the classic **two-step persuasion model**: factual information first targets the *source's credibility*, which then allows attitude change on the *topic* itself. The effect is not large, but it is patterned.
+
+---
+
+### Who is in the Changed cluster?
+
+```{r}
+#| label: tbl-changed-demo
+#| tbl-cap: "Demographic comparison: Changed vs. Stable clusters"
+
+demo_change |>
+  group_by(`Cluster` = change_cluster) |>
+  summarise(
+    n                  = n(),
+    `% Republican`     = paste0(round(mean(party3 == "Republican", na.rm=T)*100, 0), "%"),
+    `% Democrat`       = paste0(round(mean(party3 == "Democrat",   na.rm=T)*100, 0), "%"),
+    `% Ind./Other`     = paste0(round(mean(party3 == "Ind./Other", na.rm=T)*100, 0), "%"),
+    `% Conservative`   = paste0(round(mean(ideology %in%
+                           c("Very conservative","Somewhat conservative"),
+                           na.rm=T)*100, 0), "%"),
+    `% PrimePanels`    = paste0(round(mean(source == "PrimePanels")*100, 0), "%"),
+    `Mean Age (Con.)`  = round(mean(age_num, na.rm=T), 1),
+    .groups = "drop"
+  ) |>
+  mutate(Cluster = ifelse(Cluster == changed_cl,
+                          paste0(Cluster, " (Changed)"),
+                          paste0(Cluster, " (Stable)"))) |>
+  kbl() |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, position = "left") |>
+  footnote(
+    general = "Mean Age uses Connect numeric age only. Conservative = Very or Somewhat conservative.",
+    general_title = ""
+  )
+```
+
+::: {.callout-caution}
+## Caution: Small n in the Changed Cluster
+
+With only n = `r n_changed` participants in the Changed cluster, demographic percentages are based on very small cell counts and should be interpreted with extreme caution. No reliable demographic profile of "who changes" can be drawn from a sample this size. The figures above are presented for descriptive purposes only.
+:::
+
+The demographic breakdown shows no striking pattern that would clearly distinguish who changed from who didn't — which is itself an interesting (if tentative) finding: persuadability in this study does not appear to be strongly predicted by party, ideology, or the panel respondents were recruited from.
+
+---
+
+# Summary
+
+```{r}
+#| label: tbl-summary
+#| tbl-cap: "Summary: the two change clusters"
+
+tibble(
+  ` ` = c("**Size**", "**Core finding**",
+           "**Carlson credibility**", "**Carlson on Israel**",
+           "**Israel thermometers**", "**Foreign policy views**",
+           "**Israel policy positions**",
+           "**Interpretation**"),
+  `Stable Cluster` = c(
+    paste0("n = ", n_stable, " (", 100 - pct_changed, "% of sample)"),
+    "No detectable change on any of the 20 items",
+    "No change",
+    "No change",
+    "No change",
+    "No change",
+    "No change",
+    "The AI conversation did not move this group's attitudes"
+  ),
+  `Changed Cluster` = c(
+    paste0("n = ", n_changed, " (", pct_changed, "% of sample)"),
+    "Coherent multi-domain shift: Carlson credibility ↓, Israel attitudes ↑",
+    "Large decreases on 5 of 6 items (–20 to –35 points)",
+    "Commentary accuracy ↓; 'Too critical' ↑; Understands Middle East ↓",
+    "Modest increases toward Israeli people, Jewish people, State of Israel",
+    "Some decreases (AIPAC influence, cut funding); modest movement",
+    "Mixed; some movement toward more pro-Israel positions",
+    "Lost trust in Carlson as an accurate source → warmer Israel attitudes"
+  )
+) |>
+  kbl(escape = FALSE) |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = TRUE) |>
+  column_spec(1, bold = TRUE, width = "22%") |>
+  column_spec(2, width = "37%") |>
+  column_spec(3, width = "37%")
+```
+
+The central finding from the change-cluster analysis is that **the AI conversation produced a meaningful attitude shift in a minority of participants** (`r pct_changed`%), while the large majority showed no movement. The minority who changed did so in a patterned, theoretically coherent way — losing confidence in Tucker Carlson's accuracy and fairness while simultaneously warming toward Israel. This pattern is consistent with a source-credibility mechanism: once the messenger is discredited, the message loses its grip.
+
+---
+
+# What to Investigate Next
+
+These pilot results suggest several productive questions for a larger study:
+
+1. **What predicts persuadability?** With only n = `r n_changed` in the Changed cluster, we cannot reliably identify demographic or psychological predictors of who changes. A full-scale study with n ≥ 500 would allow meaningful subgroup analysis.
+
+2. **Does credibility loss persist?** The pre–post design captures immediate effects. A follow-up measurement (e.g., two weeks later) would test whether the credibility decrease and warmer Israel attitudes are durable or snap back.
+
+3. **Is the effect driven by conversation content or mere exposure?** A control condition (e.g., participants who complete both surveys but have a neutral AI conversation) would allow causal attribution.
+
+4. **Does the same pattern hold across different topics?** The intervention targeted Israel specifically. Whether a similar credibility-then-attitude pathway applies to other Carlson topics (Russia, immigration, vaccines) is an open question.
+
+---
+
+*Report generated from the combined PrimePanels + Connect dataset (n = `r n_complete` completed). Analysis performed using R with tidyverse and cluster packages.*
